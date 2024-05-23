@@ -83,28 +83,6 @@ def create_logger(logging_dir):
         logger.addHandler(logging.NullHandler())
     return logger
 
-'''
-def center_crop_arr(pil_image, image_size):
-    """
-    Center cropping implementation from ADM.
-    https://github.com/openai/guided-diffusion/blob/8fb3ad9197f16bbc40620447b2742e13458d2831/guided_diffusion/image_datasets.py#L126
-    """
-    while min(*pil_image.size) >= 2 * image_size:
-        pil_image = pil_image.resize(
-            tuple(x // 2 for x in pil_image.size), resample=Image.BOX
-        )
-
-    scale = image_size / min(*pil_image.size)
-    pil_image = pil_image.resize(
-        tuple(round(x * scale) for x in pil_image.size), resample=Image.BICUBIC
-    )
-
-    arr = np.array(pil_image)
-    crop_y = (arr.shape[0] - image_size) // 2
-    crop_x = (arr.shape[1] - image_size) // 2
-    return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
-'''
-
 def cosine_similarity(ta, tb):
     bs1, bs2 = ta.shape[0], tb.shape[0]
     frac_up = torch.matmul(ta, tb.T)
@@ -190,14 +168,6 @@ def main(args):
     opt = torch.optim.AdamW(params_to_optimize, lr=1e-3, weight_decay=0)
 
     # Setup data:
-    '''
-    transform = transforms.Compose([
-        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, args.size)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
-    ])
-    '''
     #dataset = ImageFolder(args.data_path, transform=transform, nclass=args.nclass,
     #                      ipc=args.finetune_ipc, spec=args.spec, phase=args.phase,
     #                      seed=0, return_origin=True)
@@ -249,6 +219,7 @@ def main(args):
                 model_kwargs = dict(y=y)   # can be used for conditioning, dict of extra keyword arguments
                 loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
                 pseudo_embeddings = loss_dict["output"]
+                # logger.info(f'pseudo_embeddings shape:{pseudo_embeddings.shape}')
                 loss = loss_dict["loss"].mean()
 
                 # Calculate minimax criteria
@@ -340,6 +311,8 @@ def main(args):
                 with torch.no_grad():
                     # Map input images to latent space + normalize latents:
                     x = vae.encode(x).latent_dist.sample().mul_(0.18215)
+                    # Upsample the latent code
+                    x = torch.nn.functional.interpolate(x, size=(latent_size, latent_size), mode='bilinear', align_corners=False)
                 t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
                 model_kwargs = dict(y=y)
                 loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
@@ -353,7 +326,7 @@ def main(args):
                     y_set = set(y)
                     num_y = len(y_set)
                     for c in y_set:
-                        print('len pseudo mem:', len(pseudo_memory[c]))
+                        # print('len pseudo mem:', len(pseudo_memory[c]))
                         if len(pseudo_memory[c]):
                             pos_embeddings = torch.cat(real_memory[c]).flatten(start_dim=1)
                             neg_embeddings = torch.cat(pseudo_memory[c]).flatten(start_dim=1)
@@ -444,7 +417,7 @@ if __name__ == "__main__":
     parser.add_argument("--results-dir", type=str, default="results")
     parser.add_argument("--tag", type=str, default="")
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2")
-    parser.add_argument("--size", type=int, choices=[32, 256, 512], default=256)
+    parser.add_argument("--size", type=int, choices=[256, 512], default=256)
     parser.add_argument("--num-classes", type=int, default=1000, help='the class number for the total dataset')
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--global-batch-size", type=int, default=256)
