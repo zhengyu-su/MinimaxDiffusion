@@ -305,7 +305,7 @@ def main(args):
                     dist.barrier()
         else:
             for x, y in loader:
-                # ry = ry.numpy()
+                ry = y.numpy()
                 x = x.to(device)
                 y = y.to(device)
                 with torch.no_grad():
@@ -323,27 +323,26 @@ def main(args):
                 pos_match_loss = torch.tensor(0.).to(device)
                 neg_match_loss = torch.tensor(0.).to(device)
                 if args.condense:
-                    y_set = set(y)
-                    num_y = len(y_set)
-                    for c in y_set:
-                        # print('len pseudo mem:', len(pseudo_memory[c]))
+                    ry_set = set(ry)
+                    num_y = len(ry_set)
+                    for c in ry_set:
                         if len(pseudo_memory[c]):
                             pos_embeddings = torch.cat(real_memory[c]).flatten(start_dim=1)
                             neg_embeddings = torch.cat(pseudo_memory[c]).flatten(start_dim=1)
                             # Representativeness constraint
                             pos_feat_sim = 1 - cosine_similarity(
-                                pseudo_embeddings[y == c].flatten(start_dim=1), pos_embeddings
+                                pseudo_embeddings[ry == c].flatten(start_dim=1), pos_embeddings
                             ).min()
                             # Diversity constraint
                             neg_feat_sim = cosine_similarity(
-                                pseudo_embeddings[y == c].flatten(start_dim=1), neg_embeddings
+                                pseudo_embeddings[ry == c].flatten(start_dim=1), neg_embeddings
                             ).max()
                             pos_match_loss += pos_feat_sim * args.lambda_pos / num_y
                             neg_match_loss += neg_feat_sim * args.lambda_neg / num_y
-                            logger.info(f'pos_match_loss: {pos_match_loss}, neg_match_loss: {neg_match_loss}')
+                            #logger.info(f'pos_match_loss: {pos_match_loss}, neg_match_loss: {neg_match_loss}')
                         # Update the auxiliary memories
-                        real_memory[c].extend(x[y == c].detach().split(1))
-                        pseudo_memory[c].extend(pseudo_embeddings[y == c].detach().split(1))
+                        real_memory[c].extend(x[ry == c].detach().split(1))
+                        pseudo_memory[c].extend(pseudo_embeddings[ry == c].detach().split(1))
                         while len(real_memory[c]) > args.memory_size:
                             real_memory[c].pop(0)
                         while len(pseudo_memory[c]) > args.memory_size:
