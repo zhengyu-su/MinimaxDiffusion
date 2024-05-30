@@ -76,23 +76,30 @@ class ImageFolder(datasets.DatasetFolder):
         # Override
         self.spec = spec
         self.return_origin = return_origin
-        if nclass < 1000:
-            self.classes, self.class_to_idx = self.find_subclasses(nclass=nclass,
-                                                                   phase=phase,
-                                                                   seed=seed)
-        else:
-            self.classes, self.class_to_idx = self.find_classes(self.root)
-        if dataset == 'imagenet':
+        self.dataset = dataset
+        if self.dataset == 'imagenet':
+            if nclass < 1000:
+                self.classes, self.class_to_idx = self.find_subclasses(nclass=nclass,
+                                                                    phase=phase,
+                                                                    seed=seed)
+            else:
+                self.classes, self.class_to_idx = self.find_classes(self.root)
             self.original_labels = self.find_original_classes()
-        self.nclass = nclass
-        self.samples = datasets.folder.make_dataset(self.root, self.class_to_idx, self.extensions,
-                                                    is_valid_file)
+            self.nclass = nclass
+            self.samples = datasets.folder.make_dataset(self.root, self.class_to_idx, self.extensions,
+                                                        is_valid_file)
+        else:
+            self.classes = sorted(os.listdir(self.root))
+            self.class_to_idx = {cls_name: i for i, cls_name in enumerate(self.classes)}
+            self.nclass = nclass
+            self.samples = datasets.folder.make_dataset(self.root, self.class_to_idx, self.extensions,
+                                                        is_valid_file)
 
         if ipc > 0:
             self.samples = self._subset(slct_type=slct_type, ipc=ipc)
 
         self.targets = [s[1] for s in self.samples]
-        if dataset == 'imagenet':
+        if self.dataset == 'imagenet':
             self.original_targets = [self.original_labels[s[1]] for s in self.samples]
         self.load_memory = load_memory
         self.load_transform = load_transform
@@ -144,6 +151,7 @@ class ImageFolder(datasets.DatasetFolder):
         idx_class = [[] for _ in range(self.nclass)]
         for i in range(n):
             label = self.samples[i][1]
+            #print('sample', self.samples[i])
             idx_class[label].append(i)
 
         min_class = np.array([len(idx_class[c]) for c in range(self.nclass)]).min()
@@ -191,12 +199,14 @@ class ImageFolder(datasets.DatasetFolder):
             sample = self.imgs[index]
 
         target = self.targets[index]
-        original_target = self.original_targets[index]
+        if self.dataset == 'imagenet':
+            original_target = self.original_targets[index]
         if self.transform is not None:
             sample = self.transform(sample)
         if self.target_transform is not None:
             target = self.target_transform(target)
-            original_target = self.target_transform(original_target)
+            if self.dataset == 'imagenet':
+                original_target = self.target_transform(original_target)
 
         # Return original labels for DiT generation
         if self.return_origin:
@@ -596,7 +606,6 @@ def load_data(args, tsne=False):
                                         slct_type=args.slct_type, 
                                         ipc=args.ipc, 
                                         load_memory=args.load_memory, 
-                                        spec=args.spec,
                                         dataset='cifar10')
             val_dataset = datasets.CIFAR10(args.val_dir[1], train=False, download=args.download, transform=test_transform)
             nclass = 10
