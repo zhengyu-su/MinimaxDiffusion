@@ -63,7 +63,8 @@ class ImageFolder(datasets.DatasetFolder):
                  ipc=-1,
                  seed=-1,
                  spec='none',
-                 return_origin=False):
+                 return_origin=False,
+                 dataset='imagenet'):
         self.extensions = IMG_EXTENSIONS if is_valid_file is None else None
         super(ImageFolder, self).__init__(root,
                                           loader,
@@ -81,7 +82,8 @@ class ImageFolder(datasets.DatasetFolder):
                                                                    seed=seed)
         else:
             self.classes, self.class_to_idx = self.find_classes(self.root)
-        self.original_labels = self.find_original_classes()
+        if dataset == 'imagenet':
+            self.original_labels = self.find_original_classes()
         self.nclass = nclass
         self.samples = datasets.folder.make_dataset(self.root, self.class_to_idx, self.extensions,
                                                     is_valid_file)
@@ -90,7 +92,8 @@ class ImageFolder(datasets.DatasetFolder):
             self.samples = self._subset(slct_type=slct_type, ipc=ipc)
 
         self.targets = [s[1] for s in self.samples]
-        self.original_targets = [self.original_labels[s[1]] for s in self.samples]
+        if dataset == 'imagenet':
+            self.original_targets = [self.original_labels[s[1]] for s in self.samples]
         self.load_memory = load_memory
         self.load_transform = load_transform
         if self.load_memory:
@@ -585,8 +588,17 @@ def load_data(args, tsne=False):
             val_dataset = datasets.CIFAR100(args.data_dir, train=False, download=args.download, transform=test_transform)
             nclass = 100
         elif args.dataset == 'cifar10':
-            train_dataset = datasets.CIFAR10('./datasets', train=True, download=args.download, transform=train_transform)
-            val_dataset = datasets.CIFAR10('./datasets', train=False, download=args.download, transform=test_transform)
+            #train_dataset = datasets.CIFAR10(args.val_dir[0], train=True, download=args.download, transform=train_transform)
+            train_dataset = ImageFolder(args.val_dir[0], 
+                                        train_transform, 
+                                        nclass=args.nclass, 
+                                        seed=args.dseed, 
+                                        slct_type=args.slct_type, 
+                                        ipc=args.ipc, 
+                                        load_memory=args.load_memory, 
+                                        spec=args.spec,
+                                        dataset='cifar10')
+            val_dataset = datasets.CIFAR10(args.val_dir[1], train=False, download=args.download, transform=test_transform)
             nclass = 10
         else:
             raise Exception('unknown dataset: {}'.format(args.dataset))
@@ -623,12 +635,12 @@ def load_data(args, tsne=False):
             val_subdir = 'train'
         else:
             val_subdir = 'val'
-        if len(args.imagenet_dir) == 1:
-            traindir = os.path.join(args.imagenet_dir[0], 'train')
-            valdir = os.path.join(args.imagenet_dir[0], val_subdir)
+        if len(args.val_dir) == 1:
+            traindir = os.path.join(args.val_dir[0], 'train')
+            valdir = os.path.join(args.val_dir[0], val_subdir)
         else:
-            traindir = args.imagenet_dir[0]
-            valdir = os.path.join(args.imagenet_dir[1], val_subdir)
+            traindir = args.val_dir[0]
+            valdir = os.path.join(args.val_dir[1], val_subdir)
 
         train_transform, test_transform = transform_imagenet(augment=args.augment,
                                                              size=args.size,
@@ -704,13 +716,13 @@ def load_resized_data(args):
     """Load original training data (fixed spatial size and without augmentation) for condensation
     """
     if args.dataset == 'cifar10':
-        #transform = transforms.Compose([transforms.Resize(args.size), transforms.ToTensor()])
-        transform = transforms.Compose([transforms.ToTensor()])
+        transform = transforms.Compose([transforms.Resize(args.size), transforms.ToTensor()])
+        #transform = transforms.Compose([transforms.ToTensor()])
         train_dataset = datasets.CIFAR10('./datasets', train=True, download=args.download, transform=transform)
-        print('length of cifar10:', len(train_dataset))
-        normalize = transforms.Normalize(mean=MEANS['cifar10'], std=STDS['cifar10'])
-        #transform_test = transforms.Compose([transforms.Resize(args.size), transforms.ToTensor(), normalize])
-        transform_test = transforms.Compose([transforms.ToTensor(), normalize])
+        #normalize = transforms.Normalize(mean=MEANS['cifar10'], std=STDS['cifar10'])
+        normalize = transforms.Normalize(mean=[0.5,0.5,0.5], std=[0.5,0.5,0.5])
+        transform_test = transforms.Compose([transforms.Resize(args.size), transforms.ToTensor(), normalize])
+        #transform_test = transforms.Compose([transforms.ToTensor(), normalize])
         val_dataset = datasets.CIFAR10('./datasets', train=False, download=args.download, transform=transform_test)
         train_dataset.nclass = 10
 

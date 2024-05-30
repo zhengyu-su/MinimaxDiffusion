@@ -87,7 +87,7 @@ parser.add_argument('--data_dir',
                     default='/data_large/readonly',
                     type=str,
                     help='directory that containing dataset, except imagenet (see data.py)')
-parser.add_argument('--imagenet_dir', nargs='+', default=['/ssd_data/imagenet/'])
+parser.add_argument('--val_dir', nargs='+', default=['/ssd_data/imagenet/'])
 parser.add_argument('--nclass', default=10, type=int, help='number of classes in trianing dataset')
 parser.add_argument('--dseed', default=0, type=int, help='seed for class sampling')
 parser.add_argument('--size', default=224, type=int, help='spatial size of image')
@@ -249,6 +249,8 @@ parser.add_argument('--same_compute',
                     help='match evaluation training steps for IDC')
 parser.add_argument('--name', type=str, default='', help='name of the test data folder')
 parser.add_argument('--spec', type=str, default='none')
+
+parser.add_argument("--download", action='store_true', default=False, help='whether download the dataset')
 
 parser.set_defaults(bottleneck=True)
 parser.set_defaults(verbose=False)

@@ -11,6 +11,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
+from torchvision.utils import save_image
+
 import numpy as np
 from collections import OrderedDict, defaultdict
 from PIL import Image
@@ -165,7 +167,7 @@ def main(args):
     params_to_optimize = [p for p in model.parameters() if p.requires_grad]
     total_params = sum(p.numel() for p in params_to_optimize)
     print(f"Number of Trainable Parameters: {total_params * 1.e-6:.2f} M")
-    opt = torch.optim.AdamW(params_to_optimize, lr=1e-3, weight_decay=0)
+    opt = torch.optim.AdamW(params_to_optimize, lr=1e-5, weight_decay=0)
 
     # Setup data:
     #dataset = ImageFolder(args.data_path, transform=transform, nclass=args.nclass,
@@ -308,11 +310,14 @@ def main(args):
                 ry = y.numpy()
                 x = x.to(device)
                 y = y.to(device)
+                if args.dataset == 'cifar10': # map cifar10 to corresponding imagenet classes
+                    mapping = {0: 404, 1: 436, 2: 94, 3: 281, 4: 345, 5: 207, 6: 32, 7: 340, 8: 510, 9: 864}
+                    ry = np.array([mapping[i] for i in ry])
                 with torch.no_grad():
                     # Map input images to latent space + normalize latents:
                     x = vae.encode(x).latent_dist.sample().mul_(0.18215)
                     # Upsample the latent code
-                    x = torch.nn.functional.interpolate(x, size=(latent_size, latent_size), mode='bilinear', align_corners=False)
+                    # x = torch.nn.functional.interpolate(x, size=(latent_size, latent_size), mode='bilinear', align_corners=False)
                 t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
                 model_kwargs = dict(y=y)
                 loss_dict = diffusion.training_losses(model, x, t, model_kwargs)

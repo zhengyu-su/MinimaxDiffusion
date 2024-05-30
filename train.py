@@ -12,7 +12,7 @@ import train_models.resnet as RN
 import train_models.resnet_ap as RNAP
 import train_models.convnet as CN
 import train_models.densenet_cifar as DN
-from data import load_data, MEANS, STDS
+from data_2 import load_data, MEANS, STDS
 from misc.utils import random_indices, rand_bbox, AverageMeter, accuracy, get_time, Plotter
 from efficientnet_pytorch import EfficientNet
 import time
@@ -80,7 +80,7 @@ def main(args, logger, repeat=1):
         torch.cuda.manual_seed(args.seed)
 
     cudnn.benchmark = True
-    logger(f"ImageNet directory: {args.imagenet_dir[0]}")
+    logger(f"Val data directory: {args.val_dir[0]}")
     _, train_loader, val_loader, nclass = load_data(args)
 
     best_acc_l = []

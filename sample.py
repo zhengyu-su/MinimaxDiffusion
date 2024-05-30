@@ -20,28 +20,33 @@ def main(args):
     torch.set_grad_enabled(False)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    if args.dataset == 'imagenet':
     # Labels to condition the model
-    with open('./misc/class_indices.txt', 'r') as fp:
-        all_classes = fp.readlines()
-    all_classes = [class_index.strip() for class_index in all_classes]
-    if args.spec == 'woof':
-        file_list = './misc/class_woof.txt'
-    elif args.spec == 'nette':
-        file_list = './misc/class_nette.txt'
-    else:
-        file_list = './misc/class100.txt'
-    with open(file_list, 'r') as fp:
-        sel_classes = fp.readlines()
+        with open('./misc/class_indices.txt', 'r') as fp:
+            all_classes = fp.readlines()
+        all_classes = [class_index.strip() for class_index in all_classes]
+        if args.spec == 'woof':
+            file_list = './misc/class_woof.txt'
+        elif args.spec == 'nette':
+            file_list = './misc/class_nette.txt'
+        else:
+            file_list = './misc/class100.txt'
+        with open(file_list, 'r') as fp:
+            sel_classes = fp.readlines()
 
-    phase = max(0, args.phase)
-    cls_from = args.nclass * phase
-    cls_to = args.nclass * (phase + 1)
-    sel_classes = sel_classes[cls_from:cls_to]
-    sel_classes = [sel_class.strip() for sel_class in sel_classes]
-    class_labels = []
-    
-    for sel_class in sel_classes:
-        class_labels.append(all_classes.index(sel_class))
+        phase = max(0, args.phase)
+        cls_from = args.nclass * phase
+        cls_to = args.nclass * (phase + 1)
+        sel_classes = sel_classes[cls_from:cls_to]
+        sel_classes = [sel_class.strip() for sel_class in sel_classes]
+        class_labels = []
+        
+        for sel_class in sel_classes:
+            class_labels.append(all_classes.index(sel_class))
+
+    if args.dataset == 'cifar10':
+        class_labels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        sel_classes = ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
 
     if args.ckpt is None:
         assert args.model == "DiT-XL/2", "Only DiT-XL/2 models are available for auto-download."
@@ -56,6 +61,7 @@ def main(args):
     ).to(device)
     # Auto-download a pre-trained model or load a custom DiT checkpoint from train.py:
     ckpt_path = args.ckpt or f"DiT-XL-2-{args.image_size}x{args.image_size}.pt"
+    print(f"Loading model from {ckpt_path}")
     state_dict = find_model(ckpt_path)
     model.load_state_dict(state_dict, strict=False)
     model.eval()  # important!
@@ -81,6 +87,9 @@ def main(args):
             samples = diffusion.p_sample_loop(
                 model.forward_with_cfg, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device
             )
+            # Save the samples:
+            os.makedirs(os.path.join(args.save_dir, 'samples', sel_class), exist_ok=True)
+            save_image(samples, os.path.join(args.save_dir, 'samples', sel_class, f"{shift * batch_size + args.total_shift}.png"), normalize=True, value_range=(-1, 1))
             samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
             samples = vae.decode(samples / 0.18215).sample
 
@@ -94,7 +103,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2")
     parser.add_argument("--vae", type=str, choices=["ema", "mse"], default="mse")
-    parser.add_argument("--image-size", type=int, choices=[256, 512], default=256)
+    parser.add_argument("--image-size", type=int, choices=[32, 256, 512], default=256)
     parser.add_argument("--num-classes", type=int, default=1000)
     parser.add_argument("--cfg-scale", type=float, default=4.0)
     parser.add_argument("--num-sampling-steps", type=int, default=50)
@@ -107,5 +116,6 @@ if __name__ == "__main__":
     parser.add_argument("--total-shift", type=int, default=0, help='index offset for the file name')
     parser.add_argument("--nclass", type=int, default=10, help='the class number for generation')
     parser.add_argument("--phase", type=int, default=0, help='the phase number for generating large datasets')
+    parser.add_argument("--dataset", type=str, default='imagenet', help='the dataset for generation')
     args = parser.parse_args()
     main(args)
