@@ -687,12 +687,14 @@ def load_data(args, tsne=False):
         raise Exception('unknown dataset: {}'.format(args.dataset))
 
     train_loader = MultiEpochsDataLoader(train_dataset,
+                                         #batch_size=args.global_batch_size,
                                          batch_size=args.batch_size,
                                          shuffle=True,
                                          num_workers=args.workers,
                                          persistent_workers=args.workers > 0,
                                          pin_memory=True)
     val_loader = MultiEpochsDataLoader(val_dataset,
+                                       #batch_size=args.global_batch_size // 2,
                                        batch_size=args.batch_size // 2,
                                        shuffle=False,
                                        persistent_workers=True,
@@ -830,6 +832,7 @@ def load_resized_data(args):
                                   load_memory=False)
 
     val_loader = MultiEpochsDataLoader(val_dataset,
+                                       #batch_size=args.global_batch_size // 2,
                                        batch_size=args.batch_size // 2,
                                        shuffle=False,
                                        persistent_workers=True,

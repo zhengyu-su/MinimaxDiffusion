@@ -263,7 +263,7 @@ DATA
 """
 args.nch = 3
 if args.dataset[:5] == 'cifar':
-    args.size = 32
+    #args.size = 32
     args.mix_p = 0.5
     args.dsa = True
     if args.dataset == 'cifar10':

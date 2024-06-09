@@ -167,7 +167,7 @@ def main(args):
     params_to_optimize = [p for p in model.parameters() if p.requires_grad]
     total_params = sum(p.numel() for p in params_to_optimize)
     print(f"Number of Trainable Parameters: {total_params * 1.e-6:.2f} M")
-    opt = torch.optim.AdamW(params_to_optimize, lr=1e-5, weight_decay=0)
+    opt = torch.optim.AdamW(params_to_optimize, lr=0, weight_decay=0)
 
     # Setup data:
     #dataset = ImageFolder(args.data_path, transform=transform, nclass=args.nclass,
@@ -443,6 +443,6 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default='cifar10', help='the dataset name')
     parser.add_argument("--data-dir", type=str, default='./datasets', help='the directory to store the dataset')
     parser.add_argument("--download", action='store_true', default=False, help='whether download the dataset')
-    parser.add_argument("--batch-size", type=int, default=64, help='batch size for training')
+    #parser.add_argument("--batch-size", type=int, default=64, help='batch size for training')
     args = parser.parse_args()
     main(args)

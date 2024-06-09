@@ -45,7 +45,7 @@ def main(args):
             class_labels.append(all_classes.index(sel_class))
 
     if args.dataset == 'cifar10':
-        class_labels = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        class_labels = [404, 436, 94, 281, 345, 207, 32, 340, 510, 864]
         sel_classes = ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
 
     if args.ckpt is None:
@@ -88,8 +88,8 @@ def main(args):
                 model.forward_with_cfg, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=False, device=device
             )
             # Save the samples:
-            os.makedirs(os.path.join(args.save_dir, 'samples', sel_class), exist_ok=True)
-            save_image(samples, os.path.join(args.save_dir, 'samples', sel_class, f"{shift * batch_size + args.total_shift}.png"), normalize=True, value_range=(-1, 1))
+            #os.makedirs(os.path.join(args.save_dir, 'samples', sel_class), exist_ok=True)
+            #save_image(samples, os.path.join(args.save_dir, 'samples', sel_class, f"{shift * batch_size + args.total_shift}.png"), normalize=True, value_range=(-1, 1))
             samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
             samples = vae.decode(samples / 0.18215).sample
 

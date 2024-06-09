@@ -12,7 +12,7 @@ class ConvNet(nn.Module):
                  channel=3,
                  net_act='relu',
                  net_pooling='avgpooling',
-                 im_size=(32, 32)):
+                 im_size=(256, 256)):
         # print(f"Define Convnet (depth {net_depth}, width {net_width}, norm {net_norm})")
         super(ConvNet, self).__init__()
         if net_act == 'sigmoid':
@@ -128,7 +128,7 @@ class ConvNet(nn.Module):
                 layers['pool'] += [self.net_pooling]
                 shape_feat[1] //= 2
                 shape_feat[2] //= 2
-
+        print(f"shape_feat last: {shape_feat}")
         layers['conv'] = nn.ModuleList(layers['conv'])
         layers['norm'] = nn.ModuleList(layers['norm'])
         layers['act'] = nn.ModuleList(layers['act'])

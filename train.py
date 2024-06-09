@@ -115,6 +115,7 @@ def train(args, model, train_loader, val_loader, plotter=None, logger=None):
         # TODO: optimizer scheduler steps
 
     model = model.cuda()
+    #print(model)
     logger(f"Start training with base augmentation and {args.mixup} mixup")
 
     # Start training and validation
@@ -183,6 +184,7 @@ def train_epoch(args,
         data_time.update(time.time() - end)
 
         r = np.random.rand(1)
+        #print('r:', r, 'mix_p', args.mix_p,'mixup', mixup)
         if r < args.mix_p and mixup == 'cut':
             # generate mixed sample
             lam = np.random.beta(args.beta, args.beta)
@@ -301,5 +303,7 @@ if __name__ == '__main__':
     os.makedirs(args.save_dir, exist_ok=True)
     logger = Logger(args.save_dir)
     logger(f"Save dir: {args.save_dir}")
+
+    print('batch size:', args.batch_size)
 
     main(args, logger, args.repeat)
