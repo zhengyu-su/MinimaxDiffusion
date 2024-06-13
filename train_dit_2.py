@@ -311,7 +311,7 @@ def main(args):
                 x = x.to(device)
                 y = y.to(device)
                 if args.dataset == 'cifar10': # map cifar10 to corresponding imagenet classes
-                    mapping = {0: 404, 1: 436, 2: 94, 3: 281, 4: 345, 5: 352, 6: 32, 7: 1239, 8: 510, 9: 864}
+                    mapping = {0: 404, 1: 436, 2: 94, 3: 281, 4: 352, 5: 207, 6: 32, 7: 339, 8: 510, 9: 864}
                     ry = np.array([mapping[i] for i in ry])
                 with torch.no_grad():
                     # Map input images to latent space + normalize latents:
