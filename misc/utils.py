@@ -117,6 +117,7 @@ class Plotter():
         self.data['loss_tr'].append(loss_tr)
         self.data['loss_val'].append(loss_val)
 
+        print('len of epoch:', len(self.data['epoch']))
         if len(self.data['epoch']) % self.plot_freq == 0:
             self.plot()
 
@@ -150,6 +151,7 @@ class Plotter():
             ax.set_xlabel('epochs')
 
         plt.savefig(f'{self.path}/curve_{self.idx}.png', bbox_inches='tight')
+        print('plot saved')
         plt.close()
 
 

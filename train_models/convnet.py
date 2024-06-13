@@ -38,10 +38,11 @@ class ConvNet(nn.Module):
 
         self.layers, shape_feat = self._make_layers(channel, net_width, net_depth, net_norm,
                                                     net_pooling, im_size)
-        num_feat = shape_feat[0] * shape_feat[1] * shape_feat[2]
-        self.classifier = nn.Linear(num_feat, num_classes)
+        self.num_feat = shape_feat[0] * shape_feat[1] * shape_feat[2]
+        self.classifier = nn.Linear(self.num_feat, num_classes)
 
     def forward(self, x, return_features=False):
+        x_copy = x
         for d in range(self.depth):
             x = self.layers['conv'][d](x)
             if len(self.layers['norm']) > 0:
@@ -52,6 +53,10 @@ class ConvNet(nn.Module):
 
         # x = nn.functional.avg_pool2d(x, x.shape[-1])
         out = x.view(x.shape[0], -1)
+        if out.shape[1] != self.num_feat:
+            print('x shape after:', x.shape, 'num_feat:', self.num_feat)
+            print('depth:', self.depth)
+            print('x shape before:', x_copy.shape)
         logit = self.classifier(out)
 
         if return_features:
@@ -107,6 +112,7 @@ class ConvNet(nn.Module):
     def _make_layers(self, channel, net_width, net_depth, net_norm, net_pooling, im_size):
         layers = {'conv': [], 'norm': [], 'act': [], 'pool': []}
 
+        print(f"shape_feat first: {im_size}")
         in_channels = channel
         if im_size[0] == 28:
             im_size = (32, 32)

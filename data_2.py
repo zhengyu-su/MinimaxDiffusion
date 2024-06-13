@@ -607,7 +607,10 @@ def load_data(args, tsne=False):
                                         ipc=args.ipc, 
                                         load_memory=args.load_memory, 
                                         dataset='cifar10')
-            val_dataset = datasets.CIFAR10(args.val_dir[1], train=False, download=args.download, transform=test_transform)
+            #val_dataset = datasets.CIFAR10(args.val_dir[1], train=False, download=args.download, transform=test_transform)
+            val_dataset = datasets.CIFAR10(args.val_dir[1], train=False, download=args.download, 
+                                           transform=transforms.Compose([transforms.ToTensor(),
+                                           transforms.Resize(args.size)]))
             nclass = 10
         else:
             raise Exception('unknown dataset: {}'.format(args.dataset))
@@ -832,8 +835,8 @@ def load_resized_data(args):
                                   load_memory=False)
 
     val_loader = MultiEpochsDataLoader(val_dataset,
-                                       #batch_size=args.global_batch_size // 2,
-                                       batch_size=args.batch_size // 2,
+                                       batch_size=args.global_batch_size // 2,
+                                       #batch_size=args.batch_size // 2,
                                        shuffle=False,
                                        persistent_workers=True,
                                        num_workers=4)

@@ -94,7 +94,7 @@ def main(args, logger, repeat=1):
         best_acc_l.append(best_acc)
         acc_l.append(acc)
 
-    logger(f'\n(Repeat {repeat}) Best, last acc: {np.mean(best_acc_l):.1f} {np.std(best_acc_l):.1f}')
+    logger(f'\n(Repeat {repeat}) mean, std best acc: {np.mean(best_acc_l):.1f} {np.std(best_acc_l):.1f}')
 
 
 def train(args, model, train_loader, val_loader, plotter=None, logger=None):
@@ -119,6 +119,7 @@ def train(args, model, train_loader, val_loader, plotter=None, logger=None):
     logger(f"Start training with base augmentation and {args.mixup} mixup")
 
     # Start training and validation
+    logger(f'Epochs: {args.epochs}, Batch size: {args.batch_size}, Learning rate: {args.lr}, Epoch print freq: {args.epoch_print_freq}')
     for epoch in range(cur_epoch + 1, args.epochs + 1):
         acc1_tr, _, loss_tr = train_epoch(args,
                                           train_loader,
@@ -129,18 +130,43 @@ def train(args, model, train_loader, val_loader, plotter=None, logger=None):
                                           logger,
                                           mixup=args.mixup)
 
+        is_best = False
+
         if epoch % args.epoch_print_freq == 0:
             acc1, acc5, loss_val = validate(args, val_loader, model, criterion, epoch, logger)
 
             if plotter != None:
+                print('update plotter')
                 plotter.update(epoch, acc1_tr, acc1, loss_tr, loss_val)
 
+            if acc1 > best_acc1:
+                is_best = True
+                best_acc1 = acc1
+                best_acc5 = acc5
+                if logger is not None and args.verbose:
+                    logger(f'Best accuracy (top-1 and 5): {best_acc1:.1f} {best_acc5:.1f}')
+
+            '''
             is_best = acc1 > best_acc1
             if is_best:
                 best_acc1 = acc1
                 best_acc5 = acc5
                 if logger != None and args.verbose == True:
                     logger(f'Best accuracy (top-1 and 5): {best_acc1:.1f} {best_acc5:.1f}')
+            '''
+
+        # save checkpoint every 100th epoch
+        if epoch % 100 == 0:
+            checkpoint_dir = f"{args.save_dir}/epoch{epoch}-checkpoint"  # Stores saved model checkpoints
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            checkpoint = {
+                'epoch': epoch,
+                'arch': args.net_type,
+                'state_dict': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+            }
+            checkpoint_path = f"{checkpoint_dir}/checkpoint.pt"
+            torch.save(checkpoint, checkpoint_path)
 
         if args.save_ckpt and (is_best or (epoch == args.epochs)):
             state = {
@@ -303,7 +329,5 @@ if __name__ == '__main__':
     os.makedirs(args.save_dir, exist_ok=True)
     logger = Logger(args.save_dir)
     logger(f"Save dir: {args.save_dir}")
-
-    print('batch size:', args.batch_size)
 
     main(args, logger, args.repeat)

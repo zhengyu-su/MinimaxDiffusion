@@ -251,6 +251,7 @@ parser.add_argument('--name', type=str, default='', help='name of the test data 
 parser.add_argument('--spec', type=str, default='none')
 
 parser.add_argument("--download", action='store_true', default=False, help='whether download the dataset')
+#parser.add_argument('--epoch_print_freq', type=int, default=10, help='print frequency for each epoch')
 
 parser.set_defaults(bottleneck=True)
 parser.set_defaults(verbose=False)
@@ -434,7 +435,7 @@ if args.ipc > 0:
         args.epoch_print_freq = args.epochs // 100
     else:
         args.epochs = 1000
-        args.epoch_print_freq = args.epochs
+        args.epoch_print_freq = args.epochs // 10
 else:
     args.epoch_print_freq = 1
 
