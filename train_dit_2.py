@@ -28,6 +28,15 @@ from models import DiT_models
 from download import find_model
 from diffusion import create_diffusion
 from diffusers.models import AutoencoderKL
+from cifar_models.script_util import create_model
+import tqdm
+import pickle
+import numpy as np
+import torch
+import PIL.Image
+import dnnlib
+
+from diffusers import DDPMScheduler, UNet2DModel
 
 
 #################################################################################
@@ -142,17 +151,48 @@ def main(args):
         logger = create_logger(None)
 
     # Create model:
+    # CIFAR-10 model:
+    print(f'Loading network from "{args.ckpt}"...')
+    #with dnnlib.util.open_url(args.ckpt) as f:
+    #    model = pickle.load(f)['ema'].to(device)
+
+    model_id = "google/ddpm-cifar10-32"
+
+    # load model and scheduler
+    scheduler = DDPMScheduler.from_pretrained('google/ddpm-cifar10-32')
+    model = UNet2DModel.from_pretrained('google/ddpm-cifar10-32', use_safetensors=True).to('cuda')
+
+    '''
+    model = create_model(image_size=args.size,
+                     num_channels=128,
+                     num_res_blocks=3,
+                     learn_sigma=True,
+                     class_cond=False,
+                     use_checkpoint=False,
+                     dropout=0.3,
+                     attention_resolutions="18, 6",
+                     num_heads=4,
+                     num_heads_upsample=-1,
+                     num_classes=args.num_classes,
+                     use_scale_shift_norm=False,
+                     )
+    '''
+    
+    '''
+    DiT-model:
     assert args.size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = args.size // 8
     model = DiT_models[args.model](
         input_size=latent_size,
         num_classes=args.num_classes,
     )
+    
     # Load pretrained model:
     if args.ckpt != None:
         ckpt_path = args.ckpt
         state_dict = find_model(ckpt_path)
         model.load_state_dict(state_dict, strict=False)
+'''
     # Note that parameter initialization is done within the DiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     requires_grad(ema, False)
@@ -167,7 +207,7 @@ def main(args):
     params_to_optimize = [p for p in model.parameters() if p.requires_grad]
     total_params = sum(p.numel() for p in params_to_optimize)
     print(f"Number of Trainable Parameters: {total_params * 1.e-6:.2f} M")
-    opt = torch.optim.AdamW(params_to_optimize, lr=0, weight_decay=0)
+    opt = torch.optim.AdamW(params_to_optimize, lr=1e-3, weight_decay=0)
 
     # Setup data:
     #dataset = ImageFolder(args.data_path, transform=transform, nclass=args.nclass,
@@ -310,16 +350,16 @@ def main(args):
                 ry = y.numpy()
                 x = x.to(device)
                 y = y.to(device)
-                if args.dataset == 'cifar10': # map cifar10 to corresponding imagenet classes
-                    mapping = {0: 404, 1: 436, 2: 94, 3: 281, 4: 352, 5: 207, 6: 32, 7: 339, 8: 510, 9: 864}
-                    ry = np.array([mapping[i] for i in ry])
-                with torch.no_grad():
+                #if args.dataset == 'cifar10': # map cifar10 to corresponding imagenet classes
+                #    mapping = {0: 404, 1: 436, 2: 94, 3: 281, 4: 352, 5: 207, 6: 32, 7: 339, 8: 510, 9: 864}
+                #    ry = np.array([mapping[i] for i in ry])
+                #with torch.no_grad():
                     # Map input images to latent space + normalize latents:
-                    x = vae.encode(x).latent_dist.sample().mul_(0.18215)
+                    #x = vae.encode(x).latent_dist.sample().mul_(0.18215)
                     # Upsample the latent code
                     # x = torch.nn.functional.interpolate(x, size=(latent_size, latent_size), mode='bilinear', align_corners=False)
                 t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-                model_kwargs = dict(y=y)
+                model_kwargs = dict(class_labels=y)
                 loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
                 pseudo_embeddings = loss_dict["output"]
                 loss = loss_dict["loss"].mean()
@@ -420,8 +460,8 @@ if __name__ == "__main__":
     parser.add_argument("--data-path", type=str)
     parser.add_argument("--results-dir", type=str, default="results")
     parser.add_argument("--tag", type=str, default="")
-    parser.add_argument("--model", type=str, choices=list(DiT_models.keys()), default="DiT-XL/2")
-    parser.add_argument("--size", type=int, choices=[256, 512], default=256)
+    parser.add_argument("--model", type=str, default="DiT-XL/2")
+    parser.add_argument("--size", type=int, choices=[32, 256, 512], default=256)
     parser.add_argument("--num-classes", type=int, default=1000, help='the class number for the total dataset')
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--global-batch-size", type=int, default=256)
