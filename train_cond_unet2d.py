@@ -24,19 +24,18 @@ import logging
 import os
 
 from data_2 import load_resized_data
-from models import DiT_models
-from download import find_model
 from diffusion import create_diffusion
 from diffusers.models import AutoencoderKL
 import tqdm
 import numpy as np
 import torch
-import PIL.Image
-import torch.nn.functional as F
-import dnnlib
-import pickle
+
+from typing import Dict
+
+import torch.optim as optim
 
 from diffusers import DDPMScheduler, UNet2DModel
+from diffusers.optimization import get_cosine_schedule_with_warmup
 
 
 #################################################################################
@@ -127,6 +126,7 @@ def main(args):
 
     # Setup DDP:
     dist.init_process_group("nccl")
+    print(f"World size: {dist.get_world_size()}")
     assert args.global_batch_size % dist.get_world_size() == 0, f"Batch size must be divisible by world size."
     rank = dist.get_rank()
     device = rank % torch.cuda.device_count()
@@ -151,58 +151,48 @@ def main(args):
         logger = create_logger(None)
 
     # Create model:
-    # CIFAR-10 model:
-    print(f'Loading network from "{args.ckpt}"...')
-    with dnnlib.util.open_url(args.ckpt) as f:
-        model = pickle.load(f)['ema'].to(device)
+    # CIFAR-10 model: (Hugging Face UNet2DModel with class condition)
+    model = UNet2DModel(
+    sample_size=args.size,  # the target image resolution
+    in_channels=3,  # the number of input channels, 3 for RGB images
+    out_channels=3,  # the number of output channels
+    layers_per_block=2,  # how many ResNet layers to use per UNet block
+    block_out_channels=(128, 128, 256, 256, 512, 512),  # the number of output channels for each UNet block
+    down_block_types=(
+        "DownBlock2D",  # a regular ResNet downsampling block
+        "DownBlock2D",
+        "DownBlock2D",
+        "DownBlock2D",
+        "AttnDownBlock2D",  # a ResNet downsampling block with spatial self-attention
+        "DownBlock2D",
+    ),
+    up_block_types=(
+        "UpBlock2D",  # a regular ResNet upsampling block
+        "AttnUpBlock2D",  # a ResNet upsampling block with spatial self-attention
+        "UpBlock2D",
+        "UpBlock2D",
+        "UpBlock2D",
+        "UpBlock2D",
+    ),
+    num_class_embeds=args.nclass,  # the number of class embeddings
+).to(device)
+    if args.ckpt is not None:
+        model.load_state_dict(torch.load(args.ckpt), strict=False)
+        print(f'Network loaded from "{args.ckpt}"...')
 
-    # load model and scheduler
-    #scheduler = DDPMScheduler.from_pretrained('google/ddpm-cifar10-32')
-    #model = UNet2DModel.from_pretrained('google/ddpm-cifar10-32', use_safetensors=True)
-    # Set class_embed_type
-    #model.config.class_embed_type = 'identity' # uses the class labels directly
-    #model.num_class_embeds = 10
-    #model.to(device)
-    print('model config:', model)
+    # Load the scheduler
+    noise_scheduler = DDPMScheduler.from_pretrained("google/ddpm-cifar10-32")
 
-    '''
-    model = create_model(image_size=args.size,
-                     num_channels=128,
-                     num_res_blocks=3,
-                     learn_sigma=True,
-                     class_cond=False,
-                     use_checkpoint=False,
-                     dropout=0.3,
-                     attention_resolutions="18, 6",
-                     num_heads=4,
-                     num_heads_upsample=-1,
-                     num_classes=args.num_classes,
-                     use_scale_shift_norm=False,
-                     )
-    '''
-    
-    '''
-    DiT-model:
-    assert args.size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
-    latent_size = args.size // 8
-    model = DiT_models[args.model](
-        input_size=latent_size,
-        num_classes=args.num_classes,
-    )
-    
-    # Load pretrained model:
-    if args.ckpt != None:
-        ckpt_path = args.ckpt
-        state_dict = find_model(ckpt_path)
-        model.load_state_dict(state_dict, strict=False)
-'''
+    # Loss function
+    loss_fn = torch.nn.MSELoss()
+
+    # Setup optimizer & learning rate scheduler:
+    opt = optim.AdamW(model.parameters(), lr=1e-5, weight_decay=0.1)
+
     # Note that parameter initialization is done within the DiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     requires_grad(ema, False)
-    diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
-    vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
-    vae.eval()
-    logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
+    logger.info(f"Model Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-3 in the Difffit paper):
     model = mark_difffit_trainable(model)
@@ -210,13 +200,14 @@ def main(args):
     params_to_optimize = [p for p in model.parameters() if p.requires_grad]
     total_params = sum(p.numel() for p in params_to_optimize)
     print(f"Number of Trainable Parameters: {total_params * 1.e-6:.2f} M")
-    opt = torch.optim.AdamW(params_to_optimize, lr=1e-5, weight_decay=0)
 
     # Setup data:
     #dataset = ImageFolder(args.data_path, transform=transform, nclass=args.nclass,
     #                      ipc=args.finetune_ipc, spec=args.spec, phase=args.phase,
     #                      seed=0, return_origin=True)
+
     dataset, _ = load_resized_data(args)
+
     sampler = DistributedSampler(
         dataset,
         num_replicas=dist.get_world_size(),
@@ -239,6 +230,7 @@ def main(args):
     update_ema(ema, model.module, decay=0)  # Ensure EMA is initialized with synced weights
     model.train()  # important! This enables embedding dropout for classifier-free guidance
     ema.eval()  # EMA model should always be in eval mode
+    #ve_loss = VELoss()
 
     # Variables for monitoring/logging purposes:
     train_steps = 0
@@ -252,131 +244,42 @@ def main(args):
     for epoch in range(args.epochs):
         sampler.set_epoch(epoch)      # make sure to shuffle the data differently each epoch
         logger.info(f"Beginning epoch {epoch}...")
-        if args.dataset == 'imagenet':
-            for x, ry, y in loader:
-                ry = ry.numpy()
-                x = x.to(device)
-                y = y.to(device)
-                with torch.no_grad():    # disable gradient computation for the following block
-                    # Map input images to latent space + normalize latents:
-                    x = vae.encode(x).latent_dist.sample().mul_(0.18215)
-                t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-                model_kwargs = dict(y=y)   # can be used for conditioning, dict of extra keyword arguments
-                loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
-                pseudo_embeddings = loss_dict["output"]
-                loss = loss_dict["loss"].mean()
 
-                # Calculate minimax criteria
-                pos_match_loss = torch.tensor(0.).to(device)
-                neg_match_loss = torch.tensor(0.).to(device)
-                if args.condense:
-                    ry_set = set(ry)
-                    num_ry = len(ry_set)
-                    for c in ry_set:
-                        if len(pseudo_memory[c]):
-                            pos_embeddings = torch.cat(real_memory[c]).flatten(start_dim=1)
-                            neg_embeddings = torch.cat(pseudo_memory[c]).flatten(start_dim=1)
-                            # Representativeness constraint
-                            pos_feat_sim = 1 - cosine_similarity(
-                                pseudo_embeddings[ry == c].flatten(start_dim=1), pos_embeddings
-                            ).min()
-                            # Diversity constraint
-                            neg_feat_sim = cosine_similarity(
-                                pseudo_embeddings[ry == c].flatten(start_dim=1), neg_embeddings
-                            ).max()
-                            pos_match_loss += pos_feat_sim * args.lambda_pos / num_ry
-                            neg_match_loss += neg_feat_sim * args.lambda_neg / num_ry
-
-                        # Update the auxiliary memories
-                        real_memory[c].extend(x[ry == c].detach().split(1))
-                        pseudo_memory[c].extend(pseudo_embeddings[ry == c].detach().split(1))
-                        while len(real_memory[c]) > args.memory_size:
-                            real_memory[c].pop(0)
-                        while len(pseudo_memory[c]) > args.memory_size:
-                            pseudo_memory[c].pop(0)
-
-                    all_loss = loss + pos_match_loss + neg_match_loss
-                else:
-                    all_loss = loss
-
-                opt.zero_grad()
-                all_loss.backward()
-                opt.step()
-                update_ema(ema, model.module)
-
-                # Log loss values:
-                running_loss += loss.item()
-                if pos_match_loss or neg_match_loss:
-                    running_loss_pos += pos_match_loss.item()
-                    running_loss_neg += neg_match_loss.item()
-                log_steps += 1
-                train_steps += 1
-                if train_steps % args.log_every == 0:
-                    # Measure training speed:
-                    torch.cuda.synchronize()
-                    end_time = time()
-                    steps_per_sec = log_steps / (end_time - start_time)
-                    # Reduce loss history over all processes:
-                    avg_loss = torch.tensor(running_loss / log_steps, device=device)
-                    avg_loss_pos = torch.tensor(running_loss_pos / log_steps, device=device)
-                    avg_loss_neg = torch.tensor(running_loss_neg / log_steps, device=device)
-                    dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
-                    dist.all_reduce(avg_loss_pos, op=dist.ReduceOp.SUM)
-                    dist.all_reduce(avg_loss_neg, op=dist.ReduceOp.SUM)
-                    avg_loss = avg_loss.item() / dist.get_world_size()
-                    avg_loss_pos = avg_loss_pos.item() / dist.get_world_size()
-                    avg_loss_neg = avg_loss_neg.item() / dist.get_world_size()
-                    logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f} {avg_loss_pos:.4f} {avg_loss_neg:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
-                    # Reset monitoring variables:
-                    running_loss = 0
-                    running_loss_pos = 0
-                    running_loss_neg = 0
-                    log_steps = 0
-                    start_time = time()
-
-                # Save DiT checkpoint:
-                if train_steps % args.ckpt_every == 0 and train_steps > 0:
-                    if rank == 0:
-                        checkpoint = {
-                            "model": model.module.state_dict(),
-                            "ema": ema.state_dict(),
-                            "opt": opt.state_dict(),
-                            "args": args
-                        }
-                        checkpoint_path = f"{checkpoint_dir}/{train_steps:07d}.pt"
-                        torch.save(checkpoint, checkpoint_path)
-                        logger.info(f"Saved checkpoint to {checkpoint_path}")
-                    dist.barrier()
         if args.dataset == 'cifar10':
             for x, y in loader:
                 ry = y.numpy()
                 x = x.to(device)
                 y = y.to(device)
-                #if args.dataset == 'cifar10': # map cifar10 to corresponding imagenet classes
-                #    mapping = {0: 404, 1: 436, 2: 94, 3: 281, 4: 352, 5: 207, 6: 32, 7: 339, 8: 510, 9: 864}
-                #    ry = np.array([mapping[i] for i in ry])
-                #with torch.no_grad():
-                    # Map input images to latent space + normalize latents:
-                    #x = vae.encode(x).latent_dist.sample().mul_(0.18215)
-                    # Upsample the latent code
-                    # x = torch.nn.functional.interpolate(x, size=(latent_size, latent_size), mode='bilinear', align_corners=False)
+
+                # Sample noise add to input images
+                noise = torch.randn_like(x)
+
+                # Sample a random timestep for each image
+                timesteps = torch.randint(0, 999, (x.shape[0],)).long().to(device)
+                noisy_x = noise_scheduler.add_noise(x, noise, timesteps)
+
+                # Get the model prediction
+                pseudo_embeddings = model(noisy_x, timesteps, y).sample  # Note that we pass in the labels y
+
+                # Calculate the loss
+                loss = loss_fn(pseudo_embeddings, noise)
+    
+                
+                '''
                 # Sample noise add to input images
                 noise = torch.randn(x.shape).to(device)
 
                 # Sample a random timestep for each image
-                t = torch.randint(0, scheduler.num_train_timesteps, (x.shape[0],), device=device)
+                t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
 
-                # Add noise to the clean images according to the noise magnitude at each timestep
-                # (this is the forward diffusion process)
-                noisy_images = scheduler.add_noise(x, noise, t)
-
+                net = model.module.model
+		        # Calculate the loss
+                loss = ve_loss(net, x, y)
+                
                 # Get the model prediction for the noise
-                noise_pred = model(noisy_images, t, y, return_dict=False)[0]
-
-                # Compare the prediction with the actual noise:
-                loss = F.mse_loss(noise_pred, noise)  # NB - trying to predict noise (eps) not (noisy_ims-clean_ims) or just (clean_ims)
-                pseudo_embeddings = noise_pred
-
+                noise_pred = net(x, t, y)
+                '''
+                
                 # Calculate minimax criteria
                 pos_match_loss = torch.tensor(0.).to(device)
                 neg_match_loss = torch.tensor(0.).to(device)
@@ -413,6 +316,7 @@ def main(args):
                 opt.zero_grad()
                 all_loss.backward()
                 opt.step()
+
                 update_ema(ema, model.module)
 
                 # Log loss values:

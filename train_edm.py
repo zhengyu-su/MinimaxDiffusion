@@ -24,8 +24,6 @@ import logging
 import os
 
 from data_2 import load_resized_data
-from models import DiT_models
-from download import find_model
 from diffusion import create_diffusion
 from diffusers.models import AutoencoderKL
 import tqdm
@@ -35,8 +33,12 @@ import PIL.Image
 import torch.nn.functional as F
 import dnnlib
 import pickle
+from training.networks import SongUNet
+from training.loss import EDMLoss
 
-from diffusers import DDPMScheduler, UNet2DModel
+from typing import Dict
+
+import torch.optim as optim
 
 
 #################################################################################
@@ -127,6 +129,7 @@ def main(args):
 
     # Setup DDP:
     dist.init_process_group("nccl")
+    print(f"World size: {dist.get_world_size()}")
     assert args.global_batch_size % dist.get_world_size() == 0, f"Batch size must be divisible by world size."
     rank = dist.get_rank()
     device = rank % torch.cuda.device_count()
@@ -152,57 +155,40 @@ def main(args):
 
     # Create model:
     # CIFAR-10 model:
-    print(f'Loading network from "{args.ckpt}"...')
-    with dnnlib.util.open_url(args.ckpt) as f:
-        model = pickle.load(f)['ema'].to(device)
-
-    # load model and scheduler
-    #scheduler = DDPMScheduler.from_pretrained('google/ddpm-cifar10-32')
-    #model = UNet2DModel.from_pretrained('google/ddpm-cifar10-32', use_safetensors=True)
-    # Set class_embed_type
-    #model.config.class_embed_type = 'identity' # uses the class labels directly
-    #model.num_class_embeds = 10
-    #model.to(device)
-    print('model config:', model)
-
-    '''
-    model = create_model(image_size=args.size,
-                     num_channels=128,
-                     num_res_blocks=3,
-                     learn_sigma=True,
-                     class_cond=False,
-                     use_checkpoint=False,
-                     dropout=0.3,
-                     attention_resolutions="18, 6",
-                     num_heads=4,
-                     num_heads_upsample=-1,
-                     num_classes=args.num_classes,
-                     use_scale_shift_norm=False,
-                     )
-    '''
+    # Unpickle
+    with dnnlib.util.open_url(args.pkl) as f:
+        pre_trained = pickle.load(f)
+    # model = pre_trained['ema'].to(device)
+    # torch.save(model.model.state_dict(), 'cifar_ckpt/edm_checkpoint.pth')
+    # loss_fn = pre_trained['loss_fn'] # EDM loss function
+    augment_pipe = pre_trained['augment_pipe']
+    # dataset_kwargs = pre_trained['dataset_kwargs']
     
-    '''
-    DiT-model:
-    assert args.size % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
-    latent_size = args.size // 8
-    model = DiT_models[args.model](
-        input_size=latent_size,
-        num_classes=args.num_classes,
-    )
+    # Initialize model
+    # and load edm model from .pth
+    model = SongUNet(img_resolution=args.size,
+                     in_channels=3,
+                     out_channels=3,
+                     label_dim=args.nclass,
+                     augment_dim=9,
+                     embedding_type='fourier',
+                     encoder_type='residual',
+                     channel_mult_noise=2,
+                     resample_filter=[1,3,3,1],
+                     channel_mult=[2,2,2]).to(device)
+    model.load_state_dict(torch.load(args.ckpt))
+    loss_fn = EDMLoss()
     
-    # Load pretrained model:
-    if args.ckpt != None:
-        ckpt_path = args.ckpt
-        state_dict = find_model(ckpt_path)
-        model.load_state_dict(state_dict, strict=False)
-'''
+
+    print(f"Loaded model from {args.ckpt}")
+        
     # Note that parameter initialization is done within the DiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     requires_grad(ema, False)
     diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
     vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
     vae.eval()
-    logger.info(f"DiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
+    logger.info(f"Model Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-3 in the Difffit paper):
     model = mark_difffit_trainable(model)
@@ -210,7 +196,15 @@ def main(args):
     params_to_optimize = [p for p in model.parameters() if p.requires_grad]
     total_params = sum(p.numel() for p in params_to_optimize)
     print(f"Number of Trainable Parameters: {total_params * 1.e-6:.2f} M")
-    opt = torch.optim.AdamW(params_to_optimize, lr=1e-5, weight_decay=0)
+    #opt = torch.optim.AdamW(params_to_optimize, lr=1e-5, weight_decay=0)
+
+    batch_size = args.global_batch_size
+    # Setup optimizer.
+    optimizer_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=1e-5, betas=[0.9,0.999], eps=1e-8)
+    augment_kwargs = dnnlib.EasyDict(class_name='training.augment.AugmentPipe', p=1)
+    print('Setting up loss function and optimizer...')
+    opt = dnnlib.util.construct_class_by_name(params=model.parameters(), **optimizer_kwargs) # subclass of torch.optim.Optimizer
+    #augment_pipe = dnnlib.util.construct_class_by_name(**augment_kwargs) if augment_kwargs is not None else None # training.augment.AugmentPipe
 
     # Setup data:
     #dataset = ImageFolder(args.data_path, transform=transform, nclass=args.nclass,
@@ -252,131 +246,24 @@ def main(args):
     for epoch in range(args.epochs):
         sampler.set_epoch(epoch)      # make sure to shuffle the data differently each epoch
         logger.info(f"Beginning epoch {epoch}...")
-        if args.dataset == 'imagenet':
-            for x, ry, y in loader:
-                ry = ry.numpy()
-                x = x.to(device)
-                y = y.to(device)
-                with torch.no_grad():    # disable gradient computation for the following block
-                    # Map input images to latent space + normalize latents:
-                    x = vae.encode(x).latent_dist.sample().mul_(0.18215)
-                t = torch.randint(0, diffusion.num_timesteps, (x.shape[0],), device=device)
-                model_kwargs = dict(y=y)   # can be used for conditioning, dict of extra keyword arguments
-                loss_dict = diffusion.training_losses(model, x, t, model_kwargs)
-                pseudo_embeddings = loss_dict["output"]
-                loss = loss_dict["loss"].mean()
 
-                # Calculate minimax criteria
-                pos_match_loss = torch.tensor(0.).to(device)
-                neg_match_loss = torch.tensor(0.).to(device)
-                if args.condense:
-                    ry_set = set(ry)
-                    num_ry = len(ry_set)
-                    for c in ry_set:
-                        if len(pseudo_memory[c]):
-                            pos_embeddings = torch.cat(real_memory[c]).flatten(start_dim=1)
-                            neg_embeddings = torch.cat(pseudo_memory[c]).flatten(start_dim=1)
-                            # Representativeness constraint
-                            pos_feat_sim = 1 - cosine_similarity(
-                                pseudo_embeddings[ry == c].flatten(start_dim=1), pos_embeddings
-                            ).min()
-                            # Diversity constraint
-                            neg_feat_sim = cosine_similarity(
-                                pseudo_embeddings[ry == c].flatten(start_dim=1), neg_embeddings
-                            ).max()
-                            pos_match_loss += pos_feat_sim * args.lambda_pos / num_ry
-                            neg_match_loss += neg_feat_sim * args.lambda_neg / num_ry
-
-                        # Update the auxiliary memories
-                        real_memory[c].extend(x[ry == c].detach().split(1))
-                        pseudo_memory[c].extend(pseudo_embeddings[ry == c].detach().split(1))
-                        while len(real_memory[c]) > args.memory_size:
-                            real_memory[c].pop(0)
-                        while len(pseudo_memory[c]) > args.memory_size:
-                            pseudo_memory[c].pop(0)
-
-                    all_loss = loss + pos_match_loss + neg_match_loss
-                else:
-                    all_loss = loss
-
-                opt.zero_grad()
-                all_loss.backward()
-                opt.step()
-                update_ema(ema, model.module)
-
-                # Log loss values:
-                running_loss += loss.item()
-                if pos_match_loss or neg_match_loss:
-                    running_loss_pos += pos_match_loss.item()
-                    running_loss_neg += neg_match_loss.item()
-                log_steps += 1
-                train_steps += 1
-                if train_steps % args.log_every == 0:
-                    # Measure training speed:
-                    torch.cuda.synchronize()
-                    end_time = time()
-                    steps_per_sec = log_steps / (end_time - start_time)
-                    # Reduce loss history over all processes:
-                    avg_loss = torch.tensor(running_loss / log_steps, device=device)
-                    avg_loss_pos = torch.tensor(running_loss_pos / log_steps, device=device)
-                    avg_loss_neg = torch.tensor(running_loss_neg / log_steps, device=device)
-                    dist.all_reduce(avg_loss, op=dist.ReduceOp.SUM)
-                    dist.all_reduce(avg_loss_pos, op=dist.ReduceOp.SUM)
-                    dist.all_reduce(avg_loss_neg, op=dist.ReduceOp.SUM)
-                    avg_loss = avg_loss.item() / dist.get_world_size()
-                    avg_loss_pos = avg_loss_pos.item() / dist.get_world_size()
-                    avg_loss_neg = avg_loss_neg.item() / dist.get_world_size()
-                    logger.info(f"(step={train_steps:07d}) Train Loss: {avg_loss:.4f} {avg_loss_pos:.4f} {avg_loss_neg:.4f}, Train Steps/Sec: {steps_per_sec:.2f}")
-                    # Reset monitoring variables:
-                    running_loss = 0
-                    running_loss_pos = 0
-                    running_loss_neg = 0
-                    log_steps = 0
-                    start_time = time()
-
-                # Save DiT checkpoint:
-                if train_steps % args.ckpt_every == 0 and train_steps > 0:
-                    if rank == 0:
-                        checkpoint = {
-                            "model": model.module.state_dict(),
-                            "ema": ema.state_dict(),
-                            "opt": opt.state_dict(),
-                            "args": args
-                        }
-                        checkpoint_path = f"{checkpoint_dir}/{train_steps:07d}.pt"
-                        torch.save(checkpoint, checkpoint_path)
-                        logger.info(f"Saved checkpoint to {checkpoint_path}")
-                    dist.barrier()
         if args.dataset == 'cifar10':
             for x, y in loader:
                 ry = y.numpy()
                 x = x.to(device)
                 y = y.to(device)
-                #if args.dataset == 'cifar10': # map cifar10 to corresponding imagenet classes
-                #    mapping = {0: 404, 1: 436, 2: 94, 3: 281, 4: 352, 5: 207, 6: 32, 7: 339, 8: 510, 9: 864}
-                #    ry = np.array([mapping[i] for i in ry])
-                #with torch.no_grad():
-                    # Map input images to latent space + normalize latents:
-                    #x = vae.encode(x).latent_dist.sample().mul_(0.18215)
-                    # Upsample the latent code
-                    # x = torch.nn.functional.interpolate(x, size=(latent_size, latent_size), mode='bilinear', align_corners=False)
-                # Sample noise add to input images
-                noise = torch.randn(x.shape).to(device)
 
-                # Sample a random timestep for each image
-                t = torch.randint(0, scheduler.num_train_timesteps, (x.shape[0],), device=device)
+                class_labels = F.one_hot(y, args.nclass).float()
 
-                # Add noise to the clean images according to the noise magnitude at each timestep
-                # (this is the forward diffusion process)
-                noisy_images = scheduler.add_noise(x, noise, t)
+                loss = loss_fn(net=model, images=x, labels=class_labels, augment_pipe=augment_pipe)
+                #loss.sum().mul(1 / args.global_batch_size % dist.get_world_size())
 
-                # Get the model prediction for the noise
-                noise_pred = model(noisy_images, t, y, return_dict=False)[0]
-
-                # Compare the prediction with the actual noise:
-                loss = F.mse_loss(noise_pred, noise)  # NB - trying to predict noise (eps) not (noisy_ims-clean_ims) or just (clean_ims)
-                pseudo_embeddings = noise_pred
-
+                print('x size 0:', x.size(0))
+                noise_labels =  torch.rand(x.size(0), device=device) * (model.sigma_max - model.sigma_min) + model.sigma_min
+                # Sample from the diffusion.
+                sampled = model(x, noise_labels, class_labels)
+                pseudo_embeddings = sampled
+                        
                 # Calculate minimax criteria
                 pos_match_loss = torch.tensor(0.).to(device)
                 neg_match_loss = torch.tensor(0.).to(device)
@@ -413,6 +300,7 @@ def main(args):
                 opt.zero_grad()
                 all_loss.backward()
                 opt.step()
+
                 update_ema(ema, model.module)
 
                 # Log loss values:
@@ -444,6 +332,7 @@ def main(args):
                     running_loss_neg = 0
                     log_steps = 0
                     start_time = time()
+                    
 
                 # Save DiT checkpoint:
                 if train_steps % args.ckpt_every == 0 and train_steps > 0:
@@ -497,5 +386,6 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir", type=str, default='./datasets', help='the directory to store the dataset')
     parser.add_argument("--download", action='store_true', default=False, help='whether download the dataset')
     #parser.add_argument("--batch-size", type=int, default=64, help='batch size for training')
+    parser.add_argument("--pkl", type=str, default=None, help='the pkl file for edm')
     args = parser.parse_args()
     main(args)

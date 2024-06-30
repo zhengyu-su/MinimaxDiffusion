@@ -6,15 +6,16 @@ import torch
 from tqdm import tqdm
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
-from torchvision.utils import save_image
+from torchvision.utils import save_image, make_grid
 from diffusion import create_diffusion
 from diffusers.models import AutoencoderKL
 from download import find_model
 from models import DiT_models
 import argparse
-from diffusers import DDPMScheduler, UNet2DModel
+from diffusers import DDPMScheduler, UNet2DModel, UNet2DConfig
 from torchvision import transforms
 from PIL import Image
+import matplotlib.pyplot as plt
 
 
 def main(args):
@@ -109,33 +110,40 @@ def main(args):
     if args.dataset == 'cifar10':
     	# Load model
         image_size = args.image_size
-        model = UNet2DModel.from_pretrained('google/ddpm-cifar10-32', use_safetensors=True).to('cuda')
-        #checkpoint = torch.load(args.ckpt)
-        #print(f"Loading model from {args.ckpt}")
-        #model.load_state_dict(checkpoint['model'])
+        model = UNet2DModel.from_pretrained('google/ddpm-cifar10-32', use_safetensors=True)
+        model.config.class_embed_type = 'identity'
+        model.to('cuda')
+        checkpoint = torch.load(args.ckpt)
+        print(f"Loading model from {args.ckpt}")
+        model.load_state_dict(checkpoint['model'])
+        print('model config:', model.config)
         
         # Load scheduler
         scheduler = DDPMScheduler.from_pretrained('google/ddpm-cifar10-32')
-        scheduler.set_timesteps(num_inference_steps=50)
+        scheduler.set_timesteps(num_inference_steps=1000)
         diffusion = create_diffusion(str(args.num_sampling_steps))
         batch_size = 1
         
-        x = torch.randn((batch_size, 3, image_size, image_size), device=device)
-        y = torch.tensor([2], device=device)
+        for class_label, sel_class in zip(class_labels, sel_classes):
+            os.makedirs(os.path.join(args.save_dir, sel_class), exist_ok=True)
+            for shift in tqdm(range(args.num_samples // batch_size)):
+                x = torch.randn((batch_size, 3, image_size, image_size), device=device)
+                y = torch.tensor([class_label], device=device)
         
-        model_input = x
+                model_input = x
+
         
-        for t in scheduler.timesteps:
-            with torch.no_grad():
-                noisy_residual = model(model_input, t, y).sample
-            previous_noisy_sample = scheduler.step(noisy_residual, t, model_input).prev_sample
-            model_input = previous_noisy_sample
+                for i, t in tqdm(enumerate(scheduler.timesteps)):
+                    with torch.no_grad():
+                        noisy_residual = model(model_input, t, y).sample
+                    scheduler_output = scheduler.step(noisy_residual, t, model_input)
+                    model_input = scheduler_output.prev_sample
             
-            image = (model_input/2+0.5).clamp(0,1).squeeze()
-            #image = (image.permute(1, 2, 0) * 255).round().to(torch.uint8).cpu().numpy()
-            #image = Image.fromarray(image)
-            #image.save('ddpm_generated_image.png')
-            save_image(image, 'ddpm_generated_image.png')
+                # Post-process the image
+                image = (model_input/2+0.5).clamp(0,1).squeeze()
+                image = (image.permute(1, 2, 0) * 255).round().to(torch.uint8).cpu().numpy()
+                image = Image.fromarray(image)
+                image.save(os.path.join(args.save_dir, sel_class, f"{shift + args.total_shift}.png"))
         
         '''
         for class_label, sel_class in zip(class_labels, sel_classes):
