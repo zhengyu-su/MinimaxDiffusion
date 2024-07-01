@@ -18,6 +18,7 @@ import torch
 import PIL.Image
 import dnnlib
 from torch_utils import distributed as dist
+from training.networks import EDMPrecond
 
 #----------------------------------------------------------------------------
 # Proposed EDM sampler (Algorithm 2).
@@ -26,6 +27,7 @@ def edm_sampler(
     net, latents, class_labels=None, randn_like=torch.randn_like,
     num_steps=18, sigma_min=0.002, sigma_max=80, rho=7,
     S_churn=0, S_min=0, S_max=float('inf'), S_noise=1,
+    augment_pipe=None,
 ):
     # Adjust noise levels based on what's supported by the network.
     sigma_min = max(sigma_min, net.sigma_min)
@@ -34,7 +36,7 @@ def edm_sampler(
     # Time step discretization.
     step_indices = torch.arange(num_steps, dtype=torch.float64, device=latents.device)
     t_steps = (sigma_max ** (1 / rho) + step_indices / (num_steps - 1) * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))) ** rho
-    t_steps = torch.cat([net.round_sigma(t_steps), torch.zeros_like(t_steps[:1])]) # t_N = 0
+    t_steps = torch.cat([torch.as_tensor(t_steps), torch.zeros_like(t_steps[:1])]) # t_N = 0
 
     # Main sampling loop.
     x_next = latents.to(torch.float64) * t_steps[0]
@@ -43,17 +45,19 @@ def edm_sampler(
 
         # Increase noise temporarily.
         gamma = min(S_churn / num_steps, np.sqrt(2) - 1) if S_min <= t_cur <= S_max else 0
-        t_hat = net.round_sigma(t_cur + gamma * t_cur)
-        x_hat = x_cur + (t_hat ** 2 - t_cur ** 2).sqrt() * S_noise * randn_like(x_cur)
+        t_hat = torch.as_tensor(t_cur + gamma * t_cur)
+        x_hat = x_cur + (t_hat ** 2 - t_cur ** 2).sqrt() * S_noise * torch.randn_like(x_cur)
 
         # Euler step.
-        denoised = net(x_hat, t_hat, class_labels).to(torch.float64)
+        augment_labels = augment_pipe(x_hat) if augment_pipe is not None else None
+        denoised = net(x_hat, t_hat, class_labels, augment_labels).to(torch.float64)
         d_cur = (x_hat - denoised) / t_hat
         x_next = x_hat + (t_next - t_hat) * d_cur
 
         # Apply 2nd order correction.
         if i < num_steps - 1:
-            denoised = net(x_next, t_next, class_labels).to(torch.float64)
+            augment_labels = augment_pipe(x_next) if augment_pipe is not None else None
+            denoised = net(x_next, t_next, class_labels, augment_labels).to(torch.float64)
             d_prime = (x_next - denoised) / t_next
             x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
 
@@ -185,7 +189,7 @@ class StackedRandomGenerator:
         self.generators = [torch.Generator(device).manual_seed(int(seed) % (1 << 32)) for seed in seeds]
 
     def randn(self, size, **kwargs):
-        assert size[0] == len(self.generators)
+        # assert size[0] == len(self.generators)
         return torch.stack([torch.randn(size[1:], generator=gen, **kwargs) for gen in self.generators])
 
     def randn_like(self, input):
@@ -263,7 +267,26 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
     # Load network.
     dist.print0(f'Loading network from "{network_pkl}"...')
     with dnnlib.util.open_url(network_pkl, verbose=(dist.get_rank() == 0)) as f:
-        net = pickle.load(f)['ema'].to(device)
+        checkpoint = pickle.load(f)
+    # net = checkpoint['ema'].to(device)
+
+    model_kwargs = {'embedding_type': 'fourier',
+                    'encoder_type': 'residual',
+                    'channel_mult_noise': 2,
+                    'resample_filter': [1,3,3,1],
+                    'channel_mult': [2,2,2],
+                    'augment_dim': 9,
+                    }
+
+    net = EDMPrecond(img_resolution=32,
+                     img_channels=3,
+                     label_dim=10,
+                     model_type='SongUNet',           # net.model = model_type(**model_kwargs)
+                     **model_kwargs,
+                     ).to(device)
+    state_dict = torch.load('../logs/cifar10/006-EDM-minimax/checkpoints/0096000.pt')['model']
+    #state_dict = torch.load('cifar_ckpt/edm_checkpoint.pth')
+    net.model.load_state_dict(state_dict)
 
     # Other ranks follow.
     if dist.get_rank() == 0:
@@ -279,7 +302,7 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
 
         # Pick latents and labels.
         rnd = StackedRandomGenerator(device, batch_seeds)
-        latents = rnd.randn([batch_size, net.img_channels, net.img_resolution, net.img_resolution], device=device)
+        #latents = rnd.randn([batch_size, net.img_channels, net.img_resolution, net.img_resolution], device=device)
         class_labels = None
         if net.label_dim:
             class_labels = torch.eye(net.label_dim, device=device)[rnd.randint(net.label_dim, size=[batch_size], device=device)]
@@ -291,18 +314,34 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
         sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
         have_ablation_kwargs = any(x in sampler_kwargs for x in ['solver', 'discretization', 'schedule', 'scaling'])
         sampler_fn = ablation_sampler if have_ablation_kwargs else edm_sampler
-        images = sampler_fn(net, latents, class_labels, randn_like=rnd.randn_like, **sampler_kwargs)
+
+        for class_label in class_labels:
+            class_name = str(class_label.argmax().item())
+            latent = rnd.randn([1, net.img_channels, net.img_resolution, net.img_resolution], device=device)
+            image = sampler_fn(net, latent, class_label, randn_like=rnd.randn_like, **sampler_kwargs)
+
+            # Save images.
+            images_np = (image * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+            for seed, image_np in zip(batch_seeds, images_np):
+                image_dir = os.path.join(outdir, class_name, f'{seed-seed%1000:06d}') if subdirs else outdir
+                os.makedirs(image_dir, exist_ok=True)
+                image_path = os.path.join(image_dir, f'{seed:06d}.png')
+                if image_np.shape[2] == 1:
+                    PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
+                else:
+                    PIL.Image.fromarray(image_np, 'RGB').save(image_path)
+
 
         # Save images.
-        images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
-        for seed, image_np in zip(batch_seeds, images_np):
-            image_dir = os.path.join(outdir, f'{seed-seed%1000:06d}') if subdirs else outdir
-            os.makedirs(image_dir, exist_ok=True)
-            image_path = os.path.join(image_dir, f'{seed:06d}.png')
-            if image_np.shape[2] == 1:
-                PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
-            else:
-                PIL.Image.fromarray(image_np, 'RGB').save(image_path)
+        # images_np = (images * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+        # for seed, image_np in zip(batch_seeds, images_np):
+        #     image_dir = os.path.join(outdir, f'{seed-seed%1000:06d}') if subdirs else outdir
+        #     os.makedirs(image_dir, exist_ok=True)
+        #     image_path = os.path.join(image_dir, f'{seed:06d}.png')
+        #     if image_np.shape[2] == 1:
+        #         PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
+        #     else:
+        #         PIL.Image.fromarray(image_np, 'RGB').save(image_path)
 
     # Done.
     torch.distributed.barrier()

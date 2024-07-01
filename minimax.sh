@@ -22,5 +22,5 @@ source ~/.bashrc
 conda activate /home/geiger/gwb343/.conda/envs/diff
 torchrun --nnode=1 --master_port=25678 train_cond_unet2d.py --model UNet2D --dataset cifar10 \
 --global-batch-size 2 --tag minimax --ckpt-every 48000 --log-every 6000 --epochs 50 \
---condense --finetune-ipc -1 --results-dir ../logs/cifar10 --size 32  # Replace with your actual script or command
+--condense --finetune-ipc -1 --results-dir ../logs/cifar10 --size 32 --download  # Replace with your actual script or command
 conda deactivate

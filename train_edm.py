@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import transforms
 from torchvision.utils import save_image
+from torch_utils import misc
 
 import numpy as np
 from collections import OrderedDict, defaultdict
@@ -33,7 +34,7 @@ import PIL.Image
 import torch.nn.functional as F
 import dnnlib
 import pickle
-from training.networks import SongUNet
+from training.networks import EDMPrecond
 from training.loss import EDMLoss
 
 from typing import Dict
@@ -163,20 +164,30 @@ def main(args):
     # loss_fn = pre_trained['loss_fn'] # EDM loss function
     augment_pipe = pre_trained['augment_pipe']
     # dataset_kwargs = pre_trained['dataset_kwargs']
+    dataset_kwargs = {'class_name': 'training.dataset.ImageFolderDataset', 
+                      'path': 'datasets/cifar10-32x32.zip', 
+                      'use_labels': True, 'xflip': False, 'cache': True}
     
     # Initialize model
     # and load edm model from .pth
-    model = SongUNet(img_resolution=args.size,
-                     in_channels=3,
-                     out_channels=3,
+    model_kwargs = {'embedding_type': 'fourier',
+                    'encoder_type': 'residual',
+                    'channel_mult_noise': 2,
+                    'resample_filter': [1,3,3,1],
+                    'channel_mult': [2,2,2],
+                    'augment_dim': 9,
+                    }
+
+    model = EDMPrecond(img_resolution=args.size,
+                     img_channels=3,
                      label_dim=args.nclass,
-                     augment_dim=9,
-                     embedding_type='fourier',
-                     encoder_type='residual',
-                     channel_mult_noise=2,
-                     resample_filter=[1,3,3,1],
-                     channel_mult=[2,2,2]).to(device)
-    model.load_state_dict(torch.load(args.ckpt))
+                     model_type='SongUNet',           # net.model = model_type(**model_kwargs)
+                     **model_kwargs,
+                     ).to(device)
+    # net.load_state_dict(torch.load('../logs/cifar10/006-EDM-minimax/checkpoints/0096000.pt')['model'])
+    state_dict = torch.load(args.ckpt)
+    model.model.load_state_dict(state_dict)
+
     loss_fn = EDMLoss()
     
 
@@ -211,6 +222,17 @@ def main(args):
     #                      ipc=args.finetune_ipc, spec=args.spec, phase=args.phase,
     #                      seed=0, return_origin=True)
     dataset, _ = load_resized_data(args)
+    # Load dataset.
+    print('Loading dataset...')
+
+    # dataset_obj = dnnlib.util.construct_class_by_name(**dataset_kwargs) # subclass of training.dataset.Dataset
+    # sampler = misc.InfiniteSampler(dataset=dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=seed)
+    # loader = DataLoader(dataset=dataset_obj, sampler=sampler, 
+    #                               batch_size=int(args.global_batch_size // dist.get_world_size()), 
+    #                               pin_memory=True, num_workers=args.num_workers,
+    #                               prefetch_factor=2)
+    batch_gpu_total = args.global_batch_size // dist.get_world_size()
+    loss_scaling = 1e-4
     sampler = DistributedSampler(
         dataset,
         num_replicas=dist.get_world_size(),
@@ -220,12 +242,13 @@ def main(args):
     )
     loader = DataLoader(
         dataset,
-        batch_size=int(args.global_batch_size // dist.get_world_size()),
+        batch_size=int(batch_gpu_total),
         shuffle=False,
         sampler=sampler,
         num_workers=args.num_workers,
         pin_memory=True,
-        drop_last=True
+        drop_last=True,
+        prefetch_factor=2
     )
     logger.info(f"Dataset contains {len(dataset):,} images ({args.data_path})")
 
@@ -244,7 +267,7 @@ def main(args):
 
     logger.info(f"Training for {args.epochs} epochs...")
     for epoch in range(args.epochs):
-        sampler.set_epoch(epoch)      # make sure to shuffle the data differently each epoch
+        #sampler.set_epoch(epoch)      # make sure to shuffle the data differently each epoch
         logger.info(f"Beginning epoch {epoch}...")
 
         if args.dataset == 'cifar10':
@@ -255,13 +278,10 @@ def main(args):
 
                 class_labels = F.one_hot(y, args.nclass).float()
 
-                loss = loss_fn(net=model, images=x, labels=class_labels, augment_pipe=augment_pipe)
-                #loss.sum().mul(1 / args.global_batch_size % dist.get_world_size())
-
-                print('x size 0:', x.size(0))
-                noise_labels =  torch.rand(x.size(0), device=device) * (model.sigma_max - model.sigma_min) + model.sigma_min
-                # Sample from the diffusion.
-                sampled = model(x, noise_labels, class_labels)
+                # Calculate loss and the next prediction D_yn
+                loss, sampled = loss_fn(net=model, images=x, labels=class_labels, augment_pipe=augment_pipe)
+                loss = loss.sum().mul(loss_scaling / batch_gpu_total)
+                
                 pseudo_embeddings = sampled
                         
                 # Calculate minimax criteria

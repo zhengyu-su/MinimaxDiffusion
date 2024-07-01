@@ -12,11 +12,16 @@ from diffusers.models import AutoencoderKL
 from download import find_model
 from models import DiT_models
 import argparse
-from diffusers import DDPMScheduler, UNet2DModel, UNet2DConfig
 from torchvision import transforms
 from PIL import Image
 import matplotlib.pyplot as plt
 
+# edm
+from training.networks import SongUNet
+from generate import edm_sampler
+import torch.nn.functional as F
+import dnnlib
+import pickle
 
 def main(args):
     # Setup PyTorch:
@@ -110,18 +115,24 @@ def main(args):
     if args.dataset == 'cifar10':
     	# Load model
         image_size = args.image_size
-        model = UNet2DModel.from_pretrained('google/ddpm-cifar10-32', use_safetensors=True)
-        model.config.class_embed_type = 'identity'
-        model.to('cuda')
+        model = SongUNet(img_resolution=image_size,
+                     in_channels=3,
+                     out_channels=3,
+                     label_dim=args.nclass,
+                     augment_dim=9,
+                     embedding_type='fourier',
+                     encoder_type='residual',
+                     channel_mult_noise=2,
+                     resample_filter=[1,3,3,1],
+                     channel_mult=[2,2,2]).to(device)
         checkpoint = torch.load(args.ckpt)
         print(f"Loading model from {args.ckpt}")
         model.load_state_dict(checkpoint['model'])
-        print('model config:', model.config)
+
+        with dnnlib.util.open_url(args.pkl) as f:
+            pre_trained = pickle.load(f)
+        augment_pipe = pre_trained['augment_pipe']
         
-        # Load scheduler
-        scheduler = DDPMScheduler.from_pretrained('google/ddpm-cifar10-32')
-        scheduler.set_timesteps(num_inference_steps=1000)
-        diffusion = create_diffusion(str(args.num_sampling_steps))
         batch_size = 1
         
         for class_label, sel_class in zip(class_labels, sel_classes):
@@ -130,19 +141,13 @@ def main(args):
                 x = torch.randn((batch_size, 3, image_size, image_size), device=device)
                 y = torch.tensor([class_label], device=device)
         
-                model_input = x
+                class_labels = F.one_hot(y, args.nclass).float()
+                augment_labels = augment_pipe(x)
+                sampled = edm_sampler(model, x, class_labels, augment_labels)
 
-        
-                for i, t in tqdm(enumerate(scheduler.timesteps)):
-                    with torch.no_grad():
-                        noisy_residual = model(model_input, t, y).sample
-                    scheduler_output = scheduler.step(noisy_residual, t, model_input)
-                    model_input = scheduler_output.prev_sample
-            
                 # Post-process the image
-                image = (model_input/2+0.5).clamp(0,1).squeeze()
-                image = (image.permute(1, 2, 0) * 255).round().to(torch.uint8).cpu().numpy()
-                image = Image.fromarray(image)
+                image = (sampled * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy().squeeze(0)
+                image = Image.fromarray(image, 'RGB')
                 image.save(os.path.join(args.save_dir, sel_class, f"{shift + args.total_shift}.png"))
         
         '''
@@ -208,5 +213,6 @@ if __name__ == "__main__":
     parser.add_argument("--nclass", type=int, default=10, help='the class number for generation')
     parser.add_argument("--phase", type=int, default=0, help='the phase number for generating large datasets')
     parser.add_argument("--dataset", type=str, default='imagenet', help='the dataset for generation')
+    parser.add_argument("--pkl", type=str, default=None, help='the pkl file for edm')
     args = parser.parse_args()
     main(args)
