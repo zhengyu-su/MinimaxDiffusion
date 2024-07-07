@@ -215,6 +215,9 @@ def parse_int_list(s):
             ranges.append(int(p))
     return ranges
 
+# Conver class labels to class names
+class_names = {0: 'airplane', 1: 'automobile', 2: 'bird', 3: 'cat', 4: 'deer', 5: 'dog', 6: 'frog', 7: 'horse', 8: 'ship', 9: 'truck'}
+
 #----------------------------------------------------------------------------
 
 @click.command()
@@ -266,8 +269,8 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
 
     # Load network.
     dist.print0(f'Loading network from "{network_pkl}"...')
-    with dnnlib.util.open_url(network_pkl, verbose=(dist.get_rank() == 0)) as f:
-        checkpoint = pickle.load(f)
+    #with dnnlib.util.open_url(network_pkl, verbose=(dist.get_rank() == 0)) as f:
+    #    checkpoint = pickle.load(f)
     # net = checkpoint['ema'].to(device)
 
     model_kwargs = {'embedding_type': 'fourier',
@@ -276,6 +279,7 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
                     'resample_filter': [1,3,3,1],
                     'channel_mult': [2,2,2],
                     'augment_dim': 9,
+                    'label_dropout': 2.0,
                     }
 
     net = EDMPrecond(img_resolution=32,
@@ -284,9 +288,10 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
                      model_type='SongUNet',           # net.model = model_type(**model_kwargs)
                      **model_kwargs,
                      ).to(device)
-    state_dict = torch.load('../logs/cifar10/006-EDM-minimax/checkpoints/0096000.pt')['model']
+    #state_dict = torch.load('../logs/cifar10/012-EDM-minimax/checkpoints/0096000.pt')['model']
     #state_dict = torch.load('cifar_ckpt/edm_checkpoint.pth')
-    net.model.load_state_dict(state_dict)
+    state_dict = torch.load(network_pkl)['model']
+    net.load_state_dict(state_dict)
 
     # Other ranks follow.
     if dist.get_rank() == 0:
@@ -307,8 +312,10 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
         if net.label_dim:
             class_labels = torch.eye(net.label_dim, device=device)[rnd.randint(net.label_dim, size=[batch_size], device=device)]
         if class_idx is not None:
-            class_labels[:, :] = 0
-            class_labels[:, class_idx] = 1
+            # class_labels[:, :] = 0
+            # class_labels[:, class_idx] = 1
+            class_labels = torch.eye(net.label_dim, device=device)
+
 
         # Generate images.
         sampler_kwargs = {key: value for key, value in sampler_kwargs.items() if value is not None}
@@ -316,16 +323,28 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
         sampler_fn = ablation_sampler if have_ablation_kwargs else edm_sampler
 
         for class_label in class_labels:
-            class_name = str(class_label.argmax().item())
+            class_name = class_names[class_label.argmax().item()]
             latent = rnd.randn([1, net.img_channels, net.img_resolution, net.img_resolution], device=device)
-            image = sampler_fn(net, latent, class_label, randn_like=rnd.randn_like, **sampler_kwargs)
 
+            # Setup classifier-free guidance:
+            latent = torch.cat([latent, latent], 0)
+            y_null = torch.zeros(net.label_dim, device=device)
+            y = torch.cat([class_label.clone().detach(), y_null], 0)
+            #y = class_label
+
+            # Sample images:
+            image = sampler_fn(net, latent, y, randn_like=rnd.randn_like, **sampler_kwargs)
+
+            images_np, _ = image.chunk(2, dim=0)  # Remove null class samples
+            
             # Save images.
             images_np = (image * 127.5 + 128).clip(0, 255).to(torch.uint8).permute(0, 2, 3, 1).cpu().numpy()
+
             for seed, image_np in zip(batch_seeds, images_np):
-                image_dir = os.path.join(outdir, class_name, f'{seed-seed%1000:06d}') if subdirs else outdir
+                #image_dir = os.path.join(outdir, class_name, f'{seed-seed%1000:06d}') if subdirs else outdir
+                image_dir = os.path.join(outdir, class_name) if subdirs else outdir
                 os.makedirs(image_dir, exist_ok=True)
-                image_path = os.path.join(image_dir, f'{seed:06d}.png')
+                image_path = os.path.join(image_dir, f'{seed}.png')
                 if image_np.shape[2] == 1:
                     PIL.Image.fromarray(image_np[:, :, 0], 'L').save(image_path)
                 else:

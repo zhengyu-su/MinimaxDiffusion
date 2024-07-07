@@ -159,9 +159,9 @@ def main(args):
     # Unpickle
     with dnnlib.util.open_url(args.pkl) as f:
         pre_trained = pickle.load(f)
-    # model = pre_trained['ema'].to(device)
-    # torch.save(model.model.state_dict(), 'cifar_ckpt/edm_checkpoint.pth')
-    # loss_fn = pre_trained['loss_fn'] # EDM loss function
+    #model = pre_trained['ema'].to(device)
+    #torch.save(model.model.state_dict(), 'cifar_ckpt/edm_checkpoint.pth')
+    #loss_fn = pre_trained['loss_fn'] # EDM loss function
     augment_pipe = pre_trained['augment_pipe']
     # dataset_kwargs = pre_trained['dataset_kwargs']
     dataset_kwargs = {'class_name': 'training.dataset.ImageFolderDataset', 
@@ -170,38 +170,43 @@ def main(args):
     
     # Initialize model
     # and load edm model from .pth
-    model_kwargs = {'embedding_type': 'fourier',
+    model_kwargs = {'class_name': 'training.networks.EDMPrecond',
+                    'embedding_type': 'fourier',
                     'encoder_type': 'residual',
+                    'decoder_type': 'standard',
                     'channel_mult_noise': 2,
                     'resample_filter': [1,3,3,1],
+                    'model_channels': 128,
                     'channel_mult': [2,2,2],
                     'augment_dim': 9,
-                    }
-
-    model = EDMPrecond(img_resolution=args.size,
-                     img_channels=3,
-                     label_dim=args.nclass,
-                     model_type='SongUNet',           # net.model = model_type(**model_kwargs)
-                     **model_kwargs,
-                     ).to(device)
-    # net.load_state_dict(torch.load('../logs/cifar10/006-EDM-minimax/checkpoints/0096000.pt')['model'])
-    state_dict = torch.load(args.ckpt)
-    model.model.load_state_dict(state_dict)
-
-    loss_fn = EDMLoss()
+                    'dropout': 0.13,}
     
+    interface_kwargs = dict(img_resolution=args.size, img_channels=3, label_dim=args.nclass, model_type='SongUNet')
+    model = dnnlib.util.construct_class_by_name(**model_kwargs, **interface_kwargs) # subclass of torch.nn.Module
+    model.train().requires_grad_(True).to(device)
 
+    # model = EDMPrecond(img_resolution=args.size,
+    #                  img_channels=3,
+    #                  label_dim=args.nclass,
+    #                  model_type='SongUNet',           # net.model = model_type(**model_kwargs)
+    #                  **model_kwargs,
+    #                  ).to(device)
+    # net.load_state_dict(torch.load('../logs/cifar10/006-EDM-minimax/checkpoints/0096000.pt')['model'])
+    #state_dict = torch.load(args.ckpt)
+    if args.ckpt is not None:
+        state_dict = torch.load('cifar_ckpt/edm_checkpoint.pth')
+        model.model.load_state_dict(state_dict)
+    
     print(f"Loaded model from {args.ckpt}")
         
     # Note that parameter initialization is done within the DiT constructor
     ema = deepcopy(model).to(device)  # Create an EMA of the model for use after training
     requires_grad(ema, False)
-    diffusion = create_diffusion(timestep_respacing="")  # default: 1000 steps, linear noise schedule
-    vae = AutoencoderKL.from_pretrained(f"stabilityai/sd-vae-ft-{args.vae}").to(device)
-    vae.eval()
     logger.info(f"Model Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-3 in the Difffit paper):
+    loss_kwargs = {'class_name': 'training.loss.EDMLoss'}
+    loss_fn = dnnlib.util.construct_class_by_name(**loss_kwargs) # training.loss.(VP|VE|EDM)Loss
     model = mark_difffit_trainable(model)
     model = DDP(model.to(device), device_ids=[rank])
     params_to_optimize = [p for p in model.parameters() if p.requires_grad]
@@ -211,10 +216,10 @@ def main(args):
 
     batch_size = args.global_batch_size
     # Setup optimizer.
-    optimizer_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=1e-5, betas=[0.9,0.999], eps=1e-8)
-    augment_kwargs = dnnlib.EasyDict(class_name='training.augment.AugmentPipe', p=1)
+    optimizer_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=args.lr, betas=[0.9,0.999], eps=1e-8)
+    augment_kwargs = dnnlib.EasyDict(class_name='training.augment.AugmentPipe', p=0.12)
     print('Setting up loss function and optimizer...')
-    opt = dnnlib.util.construct_class_by_name(params=model.parameters(), **optimizer_kwargs) # subclass of torch.optim.Optimizer
+    opt = dnnlib.util.construct_class_by_name(params=params_to_optimize, **optimizer_kwargs) # subclass of torch.optim.Optimizer
     #augment_pipe = dnnlib.util.construct_class_by_name(**augment_kwargs) if augment_kwargs is not None else None # training.augment.AugmentPipe
 
     # Setup data:
@@ -232,7 +237,7 @@ def main(args):
     #                               pin_memory=True, num_workers=args.num_workers,
     #                               prefetch_factor=2)
     batch_gpu_total = args.global_batch_size // dist.get_world_size()
-    loss_scaling = 1e-4
+    loss_scaling = 1e-3 / 2
     sampler = DistributedSampler(
         dataset,
         num_replicas=dist.get_world_size(),
@@ -265,15 +270,32 @@ def main(args):
     real_memory = defaultdict(list)
     pseudo_memory = defaultdict(list)
 
+    # Print settings:
+    logger.info(f'Training with batch size {batch_size} on {dist.get_world_size()} GPUs.')
+    logger.info(f'lambda_pos: {args.lambda_pos}, lambda_neg: {args.lambda_neg}, memory_size: {args.memory_size}')
+    logger.info(f'Optimizer: {opt}')
+
     logger.info(f"Training for {args.epochs} epochs...")
     for epoch in range(args.epochs):
-        #sampler.set_epoch(epoch)      # make sure to shuffle the data differently each epoch
+        sampler.set_epoch(epoch)      # make sure to shuffle the data differently each epoch
         logger.info(f"Beginning epoch {epoch}...")
 
         if args.dataset == 'cifar10':
+            # opt.zero_grad(set_to_none=True)
+
             for x, y in loader:
                 ry = y.numpy()
-                x = x.to(device)
+                #x = x.to(device).to(torch.float32) / 127.5 - 1
+                x = x.to(device).to(torch.float32)      # input image range [-1,1]
+                '''
+                print('Min pixel value:', x.min().item())
+                save_path = '../test/'
+                os.makedirs(save_path, exist_ok=True)
+                image_path = os.path.join(save_path, 'x.png')
+                save_image(x, image_path)
+                '''
+                
+
                 y = y.to(device)
 
                 class_labels = F.one_hot(y, args.nclass).float()
@@ -316,11 +338,9 @@ def main(args):
                     all_loss = loss + pos_match_loss + neg_match_loss
                 else:
                     all_loss = loss
-
                 opt.zero_grad()
                 all_loss.backward()
                 opt.step()
-
                 update_ema(ema, model.module)
 
                 # Log loss values:
@@ -407,5 +427,6 @@ if __name__ == "__main__":
     parser.add_argument("--download", action='store_true', default=False, help='whether download the dataset')
     #parser.add_argument("--batch-size", type=int, default=64, help='batch size for training')
     parser.add_argument("--pkl", type=str, default=None, help='the pkl file for edm')
+    parser.add_argument("--lr", type=float, default=1e-3, help='the learning rate for training')
     args = parser.parse_args()
     main(args)

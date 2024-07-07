@@ -419,6 +419,7 @@ else:
 if args.test:
     args.save_dir = './results/test'
 else:
+    # args.save_dir = f"./results/{datatag}/{args.val_dir.replace("/", "-")}{modeltag}{args.tag}"
     args.save_dir = f"./results/{datatag}/{modeltag}{args.tag}"
 args.modeltag = modeltag
 args.datatag = datatag
@@ -434,7 +435,7 @@ if args.ipc > 0:
             args.epochs = ipc_epoch(args.ipc, args.factor, args.nclass)
         args.epoch_print_freq = args.epochs // 100
     else:
-        args.epochs = 1000
+        args.epochs = 2000
         args.epoch_print_freq = args.epochs // 10
 else:
     args.epoch_print_freq = 1

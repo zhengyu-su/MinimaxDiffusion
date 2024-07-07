@@ -8,6 +8,7 @@ import numpy as np
 import warnings
 from misc import utils
 from PIL import Image
+from torch.utils.data import DataLoader, Subset
 
 warnings.filterwarnings("ignore")
 
@@ -598,7 +599,16 @@ def load_data(args, tsne=False):
             val_dataset = datasets.CIFAR100(args.data_dir, train=False, download=args.download, transform=test_transform)
             nclass = 100
         elif args.dataset == 'cifar10':
-            #train_dataset = datasets.CIFAR10(args.val_dir[0], train=True, download=args.download, transform=train_transform)
+            train_transform = transforms.Compose([transforms.ToTensor()])
+            # cifar_dataset = datasets.CIFAR10(args.val_dir[0], train=True, download=args.download, transform=train_transform)
+            # class_indices = {i: np.where(np.array(cifar_dataset.targets) == i)[0] for i in range(10)}
+            # # Select 50 random images from each class
+            # selected_indices = []
+            # for class_id, indices in class_indices.items():
+            #     selected_indices.extend(np.random.choice(indices, 50, replace=False))
+            # # Create a Subset dataset
+            # train_dataset = Subset(cifar_dataset, selected_indices)
+
             train_dataset = ImageFolder(args.val_dir[0], 
                                         train_transform, 
                                         nclass=args.nclass, 
@@ -609,8 +619,7 @@ def load_data(args, tsne=False):
                                         dataset='cifar10')
             #val_dataset = datasets.CIFAR10(args.val_dir[1], train=False, download=args.download, transform=test_transform)
             val_dataset = datasets.CIFAR10(args.val_dir[1], train=False, download=args.download, 
-                                           transform=transforms.Compose([transforms.ToTensor(),
-                                           transforms.Resize(args.size)]))
+                                           transform=transforms.Compose([transforms.ToTensor(),]))
             nclass = 10
         else:
             raise Exception('unknown dataset: {}'.format(args.dataset))
@@ -730,13 +739,21 @@ def load_resized_data(args):
     """Load original training data (fixed spatial size and without augmentation) for condensation
     """
     if args.dataset == 'cifar10':
-        transform = transforms.Compose([transforms.Resize(args.size), transforms.ToTensor()])
-        #transform = transforms.Compose([transforms.ToTensor()])
-        train_dataset = datasets.CIFAR10('./datasets', train=True, download=args.download, transform=transform)
+        #transform = transforms.Compose([transforms.Resize(args.size), transforms.ToTensor()])
         #normalize = transforms.Normalize(mean=MEANS['cifar10'], std=STDS['cifar10'])
         normalize = transforms.Normalize(mean=[0.5,0.5,0.5], std=[0.5,0.5,0.5])
-        transform_test = transforms.Compose([transforms.Resize(args.size), transforms.ToTensor(), normalize])
-        #transform_test = transforms.Compose([transforms.ToTensor(), normalize])
+        transform_train = transforms.Compose([transforms.RandomHorizontalFlip(), transforms.ToTensor(), normalize])
+        #train_dataset = ImageFolder('~/Projects/minimax/MinimaxDiffusion/datasets/cifar-edm', 
+        #                                transform, 
+        #                                nclass=args.nclass, 
+        #                                seed=0, 
+        #                                slct_type='random', 
+        #                                ipc=50, 
+        #                                load_memory=True, 
+        #                                dataset='cifar10')
+        train_dataset = datasets.CIFAR10('./datasets', train=True, download=args.download, transform=transform_train)
+        #transform_test = transforms.Compose([transforms.Resize(args.size), transforms.ToTensor(), normalize])
+        transform_test = transforms.Compose([transforms.ToTensor(), normalize])
         val_dataset = datasets.CIFAR10('./datasets', train=False, download=args.download, transform=transform_test)
         train_dataset.nclass = 10
 

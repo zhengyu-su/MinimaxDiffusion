@@ -210,7 +210,7 @@ def main(args):
     params_to_optimize = [p for p in model.parameters() if p.requires_grad]
     total_params = sum(p.numel() for p in params_to_optimize)
     print(f"Number of Trainable Parameters: {total_params * 1.e-6:.2f} M")
-    opt = torch.optim.AdamW(params_to_optimize, lr=1e-5, weight_decay=0)
+    opt = torch.optim.AdamW(params_to_optimize, lr=1e-3, weight_decay=0)
 
     # Setup data:
     #dataset = ImageFolder(args.data_path, transform=transform, nclass=args.nclass,

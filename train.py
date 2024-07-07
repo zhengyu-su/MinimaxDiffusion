@@ -81,7 +81,9 @@ def main(args, logger, repeat=1):
 
     cudnn.benchmark = True
     logger(f"Val data directory: {args.val_dir[0]}")
-    _, train_loader, val_loader, nclass = load_data(args)
+    train_dataset, train_loader, val_loader, nclass = load_data(args)
+    logger(f'len train_loader: {len(train_loader)}')
+    logger(f'len dataset: {len(train_dataset)}')
 
     best_acc_l = []
     acc_l = []
@@ -156,7 +158,7 @@ def train(args, model, train_loader, val_loader, plotter=None, logger=None):
             '''
 
         # save checkpoint every 100th epoch
-        if epoch % 100 == 0:
+        if epoch % 500 == 0:
             checkpoint_dir = f"{args.save_dir}/epoch{epoch}-checkpoint"  # Stores saved model checkpoints
             os.makedirs(checkpoint_dir, exist_ok=True)
             checkpoint = {
@@ -206,6 +208,7 @@ def train_epoch(args,
         if train_loader.device == 'cpu':
             input = input.cuda()
             target = target.cuda()
+            #logger(f'train min: {input.min()}, max: {input.max()}')
 
         data_time.update(time.time() - end)
 
